@@ -7,6 +7,7 @@ from .gp import GP, safe_noise_floor
 from .clf import (
     CLASSIFIER_REGISTRY
 )
+from .transforms import PrincipalAxesTransform
 from .utils.seed import get_new_jax_key, get_numpy_rng
 from .utils.log import get_logger
 from .utils.core import get_threshold_for_nsigma
@@ -25,6 +26,9 @@ class GPwithClassifier(GP):
                  tausq=None, tausq_bounds=[1e-4, 1e4],
                  kernel_variance_prior=None, lengthscale_prior=None, 
                  lengthscales=None, kernel_variance=1.0,
+                 rotation_covariance=None, rotation_samples=None,
+                 rotation_weights=None, rotation_log_weights=None,
+                 rotation_dims=None,
                  param_names=None,
                  train_clf_on_init=True,  # Prevent retraining on copy
                  ):
@@ -57,6 +61,8 @@ class GPwithClassifier(GP):
             Threshold for adding points to the GP training set. Default is 5000.
         noise, kernel, optimizer, kernel_variance_bounds, lengthscale_bounds, lengthscale_priors, lengthscales, kernel_variance:
             GP parameters (see DSLP_GP/SAAS_GP). Note: bounds are now in actual space, not log10.
+        rotation_covariance, rotation_samples, rotation_weights, rotation_log_weights, rotation_dims:
+            Static kernel-metric rotation parameters. See GP for details.
 
         """
         # Store Data and Classifier Settings
@@ -108,6 +114,11 @@ class GPwithClassifier(GP):
             'kernel_variance_prior': kernel_variance_prior,
             'tausq': tausq,
             'tausq_bounds': tausq_bounds,
+            'rotation_covariance': rotation_covariance,
+            'rotation_samples': rotation_samples,
+            'rotation_weights': rotation_weights,
+            'rotation_log_weights': rotation_log_weights,
+            'rotation_dims': rotation_dims,
             'param_names': param_names,
         }
                     
@@ -359,6 +370,19 @@ class GPwithClassifier(GP):
             tausq_bounds=state.get('tausq_bounds', [-4, 4]),
             train_clf_on_init=state.get('train_clf_on_init', True),
         )
+
+        transform_state = state.get('input_transform_state')
+
+        if transform_state is not None:
+            if transform_state['type'] != 'PrincipalAxesTransform':
+                raise ValueError(
+                    f"Unknown input transform: {transform_state['type']}"
+                )
+            transform = PrincipalAxesTransform.from_state_dict(
+                transform_state
+            )
+            gp_clf.kernel.set_input_transform(transform)
+            gp_clf.recompute_cholesky()
         
         # # Restore computed state if available
         # if state.get('cholesky') is not None:

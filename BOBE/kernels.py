@@ -48,6 +48,15 @@ class Kernel(ABC):
         self.lengthscales = jnp.array(lengthscales)
         self.kernel_variance = kernel_variance
         self.noise = noise
+        self.input_transform = None
+
+    def set_input_transform(self, transform):
+        self.input_transform = transform
+
+    def _transform_inputs(self, x):
+        if self.input_transform is None:
+            return x
+        return self.input_transform.forward(x)
     
     def sq_dist(self, xa, xb):
         """
@@ -166,6 +175,10 @@ class RBFKernel(Kernel):
         jnp.ndarray
             Kernel matrix of shape (n1, n2).
         """
+
+        xa = self._transform_inputs(xa)
+        xb = self._transform_inputs(xb)
+
         # Scale inputs by lengthscales
         xa_scaled = xa / self.lengthscales
         xb_scaled = xb / self.lengthscales
@@ -210,6 +223,9 @@ class MaternKernel(Kernel):
         jnp.ndarray
             Kernel matrix of shape (n1, n2).
         """
+        xa = self._transform_inputs(xa)
+        xb = self._transform_inputs(xb)
+
         # Scale inputs by lengthscales
         xa_scaled = xa / self.lengthscales
         xb_scaled = xb / self.lengthscales

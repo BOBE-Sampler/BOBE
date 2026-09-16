@@ -12,6 +12,7 @@ from .optim import optimize_optax, optimize_scipy
 from .utils.seed import get_new_jax_key, get_numpy_rng
 import numpyro.distributions as dist
 from .kernels import Kernel, RBFKernel, MaternKernel
+from .transforms import PrincipalAxesTransform
 
 
 safe_noise_floor = 1e-12
@@ -111,7 +112,7 @@ class GP:
     
     def __init__(self,train_x,train_y,noise=1e-8,kernel="rbf",optimizer="scipy",optimizer_options={},
                  kernel_variance_bounds = [1e-4, 1e8],lengthscale_bounds = [0.01,5],lengthscales=None,kernel_variance=None,
-                 kernel_variance_prior=None, lengthscale_prior=None, tausq=None, tausq_bounds=[1e-4,1e4], param_names: List[str] = None):
+                 kernel_variance_prior=None, lengthscale_prior=None, tausq=None, tausq_bounds=[1e-4,1e4], rotation_covariance=None, rotation_samples=None, rotation_weights=None, rotation_log_weights=None, rotation_dims=None, param_names: List[str] = None):
         """
         Initialize the Gaussian Process model.
 
@@ -153,6 +154,16 @@ class GP:
         tausq_bounds : list, optional
             Bounds for the tausq parameter (in log space). Only used when lengthscale_prior='SAAS'.
             Defaults to [-4, 4].
+        rotation_covariance : jnp.ndarray, optional
+            Covariance matrix used to define a static rotation of the kernel metric.
+        rotation_samples : jnp.ndarray, optional
+            Samples or chain points used to estimate the covariance matrix for defining the static rotation.
+        rotation_weights : jnp.ndarray, optional
+            Weights associated with rotation_samples.
+        rotation_log_weights : jnp.ndarray, optional
+            Log-weights associated with rotation_samples, such as nested-sampling log weights.
+        rotation_dims : tuple of int, optional
+            Dimensions of the kernel metric to rotate. If None, all dimensions are rotated.
         """
         # Setup and validate training data
         self._setup_training_data(train_x, train_y)
@@ -167,6 +178,44 @@ class GP:
         # Instantiate kernel object
         kernel_classes = {"rbf": RBFKernel, "matern": MaternKernel}
         self.kernel = kernel_classes[self.kernel_name](self.lengthscales, self.kernel_variance, self.noise)
+
+        # Rotation transform for the kernel metric
+        rotation_requested = any(
+            value is not None
+            for value in (
+                rotation_covariance,
+                rotation_samples,
+                rotation_weights,
+                rotation_log_weights,
+                rotation_dims,
+            )
+        )
+
+        if rotation_requested:
+            if rotation_dims is not None and len(rotation_dims) > 0:
+                if max(rotation_dims) >= self.ndim:
+                    raise ValueError("rotation_dims contains indices outside the GP input dimensions")
+
+            transform = PrincipalAxesTransform(
+                covariance=rotation_covariance,
+                samples=rotation_samples,
+                weights=rotation_weights,
+                log_weights=rotation_log_weights,
+                rotation_dims=rotation_dims
+            ) 
+
+            expected_ndim = (
+                self.ndim
+                if rotation_dims is None
+                else len(rotation_dims)
+            )
+
+            if transform.rotation.shape != (expected_ndim, expected_ndim):
+                raise ValueError(
+                    f"Rotation dimensions are incompatible with the GP input dimensions. Expected rotation shape {(expected_ndim, expected_ndim)}, got {transform.rotation.shape}."
+                )
+
+            self.kernel.set_input_transform(transform)
         
         # Compute initial kernel matrices
         K = self.kernel.covariance(self.train_x, self.train_x, include_noise=True)
@@ -534,6 +583,13 @@ class GP:
             'lengthscale_bounds': self.lengthscale_bounds,
             'kernel_variance_bounds': self.kernel_variance_bounds,
             'tausq_bounds': self.tausq_bounds,
+
+            # Input transform
+            'input_transform_state': (
+                self.kernel.input_transform.state_dict()
+                if self.kernel.input_transform is not None
+                else None
+            ),
             
             # Computed state
             'cholesky': np.array(self.cholesky) if hasattr(self, 'cholesky') else None,
@@ -580,12 +636,26 @@ class GP:
             tausq=state.get('tausq', 1.0),
             tausq_bounds=state.get('tausq_bounds', [-4, 4])
         )
+
+        transform_state = state.get('input_transform_state')
+        if transform_state is not None:
+            if transform_state['type'] != 'PrincipalAxesTransform':
+                raise ValueError(f"Unknown input transform {transform_state['type']}")
+
+            transform = PrincipalAxesTransform.from_state_dict(transform_state)
+            gp.kernel.set_input_transform(transform)
+            
         
         # Restore computed state if available
-        if state['cholesky'] is not None:
+        if state['cholesky'] is not None and state['alphas'] is not None:
             gp.cholesky = jnp.array(state['cholesky'])
-        if state['alphas'] is not None:
             gp.alphas = jnp.array(state['alphas'])
+        elif gp.kernel.input_transform is not None:
+            gp.recompute_cholesky()
+        # if state['cholesky'] is not None:
+        #     gp.cholesky = jnp.array(state['cholesky'])
+        # if state['alphas'] is not None:
+        #     gp.alphas = jnp.array(state['alphas'])
         
         return gp
     
