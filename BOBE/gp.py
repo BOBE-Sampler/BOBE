@@ -155,9 +155,9 @@ class GP:
             Bounds for the tausq parameter (in log space). Only used when lengthscale_prior='SAAS'.
             Defaults to [-4, 4].
         rotation_covariance : jnp.ndarray, optional
-            Covariance matrix used to define a static rotation of the kernel metric.
+            Covariance matrix in GP unit-hypercube coordinates used to define a static rotation of the kernel metric.
         rotation_samples : jnp.ndarray, optional
-            Samples or chain points used to estimate the covariance matrix for defining the static rotation.
+            Samples or chain points in GP unit-hypercube coordinates used to estimate the covariance matrix for defining the static rotation.
         rotation_weights : jnp.ndarray, optional
             Weights associated with rotation_samples.
         rotation_log_weights : jnp.ndarray, optional

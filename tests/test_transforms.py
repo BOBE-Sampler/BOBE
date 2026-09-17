@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import jax.numpy as jnp
 
-from BOBE.transforms import PrincipalAxesTransform
+from BOBE.transforms import PrincipalAxesTransform, prepare_rotation_inputs
 
 
 COVARIANCE_2D = jnp.array([
@@ -24,6 +24,28 @@ SAMPLES_2D = jnp.array([
     [0.65, 0.75],
     [0.90, 0.60],
 ])
+
+PARAM_BOUNDS_4D = jnp.array([
+    [10.0, -5.0, 100.0, 0.0],
+    [20.0,  5.0, 300.0, 4.0],
+])
+
+PARAM_WIDTHS_4D = PARAM_BOUNDS_4D[1] - PARAM_BOUNDS_4D[0]
+
+PHYSICAL_COVARIANCE_4D = (
+    FULL_COVARIANCE_4D
+    * jnp.outer(PARAM_WIDTHS_4D, PARAM_WIDTHS_4D)
+)
+
+DIMS_02 = jnp.array([0, 2])
+
+PHYSICAL_COVARIANCE_02 = (
+    COVARIANCE_2D
+    * jnp.outer(
+        PARAM_WIDTHS_4D[DIMS_02],
+        PARAM_WIDTHS_4D[DIMS_02],
+    )
+)
 
 
 def weighted_covariance(samples, weights):
@@ -467,4 +489,168 @@ def test_sample_weights_must_have_positive_total():
         PrincipalAxesTransform(
             samples=SAMPLES_2D,
             weights=weights,
+        )
+
+
+def test_prepare_physical_covariance_to_unit_space():
+    covariance, samples = prepare_rotation_inputs(
+        covariance=PHYSICAL_COVARIANCE_4D,
+        param_bounds=PARAM_BOUNDS_4D,
+    )
+
+    np.testing.assert_allclose(
+        covariance,
+        FULL_COVARIANCE_4D,
+        atol=1e-6,
+    )
+    assert samples is None
+
+
+def test_prepare_physical_samples_to_unit_space():
+    physical_samples = (
+        PARAM_BOUNDS_4D[0, DIMS_02]
+        + SAMPLES_2D
+        * PARAM_WIDTHS_4D[DIMS_02]
+    )
+
+    covariance, samples = prepare_rotation_inputs(
+        samples=physical_samples,
+        param_bounds=PARAM_BOUNDS_4D,
+        rotation_dims=[0, 2],
+    )
+
+    assert covariance is None
+
+    np.testing.assert_allclose(
+        samples,
+        SAMPLES_2D,
+        atol=1e-6,
+    )
+
+
+def test_full_and_reduced_physical_covariance_give_same_rotation():
+    full_covariance, _ = prepare_rotation_inputs(
+        covariance=PHYSICAL_COVARIANCE_4D,
+        param_bounds=PARAM_BOUNDS_4D,
+        rotation_dims=[0, 2],
+    )
+
+    reduced_covariance, _ = prepare_rotation_inputs(
+        covariance=PHYSICAL_COVARIANCE_02,
+        param_bounds=PARAM_BOUNDS_4D,
+        rotation_dims=[0, 2],
+    )
+
+    full_transform = PrincipalAxesTransform(
+        covariance=full_covariance,
+        rotation_dims=[0, 2],
+    )
+
+    reduced_transform = PrincipalAxesTransform(
+        covariance=reduced_covariance,
+        rotation_dims=[0, 2],
+    )
+
+    xa = jnp.array([0.15, 0.20, 0.35, 0.40])
+    xb = jnp.array([0.75, 0.60, 0.55, 0.80])
+
+    np.testing.assert_allclose(
+        squared_transformed_difference(
+            full_transform,
+            xa,
+            xb,
+        ),
+        squared_transformed_difference(
+            reduced_transform,
+            xa,
+            xb,
+        ),
+        atol=1e-6,
+    )
+
+
+def test_full_and_reduced_physical_samples_give_same_rotation():
+    full_samples = jnp.column_stack([
+        SAMPLES_2D[:, 0],
+        jnp.linspace(0.1, 0.9, SAMPLES_2D.shape[0]),
+        SAMPLES_2D[:, 1],
+        jnp.linspace(0.9, 0.1, SAMPLES_2D.shape[0]),
+    ])
+
+    physical_full_samples = (
+        PARAM_BOUNDS_4D[0]
+        + full_samples * PARAM_WIDTHS_4D
+    )
+
+    physical_reduced_samples = (
+        PARAM_BOUNDS_4D[0, DIMS_02]
+        + SAMPLES_2D
+        * PARAM_WIDTHS_4D[DIMS_02]
+    )
+
+    _, full_samples_unit = prepare_rotation_inputs(
+        samples=physical_full_samples,
+        param_bounds=PARAM_BOUNDS_4D,
+        rotation_dims=[0, 2],
+    )
+
+    _, reduced_samples_unit = prepare_rotation_inputs(
+        samples=physical_reduced_samples,
+        param_bounds=PARAM_BOUNDS_4D,
+        rotation_dims=[0, 2],
+    )
+
+    full_transform = PrincipalAxesTransform(
+        samples=full_samples_unit,
+        rotation_dims=[0, 2],
+    )
+
+    reduced_transform = PrincipalAxesTransform(
+        samples=reduced_samples_unit,
+        rotation_dims=[0, 2],
+    )
+
+    xa = jnp.array([0.15, 0.20, 0.35, 0.40])
+    xb = jnp.array([0.75, 0.60, 0.55, 0.80])
+
+    np.testing.assert_allclose(
+        squared_transformed_difference(
+            full_transform,
+            xa,
+            xb,
+        ),
+        squared_transformed_difference(
+            reduced_transform,
+            xa,
+            xb,
+        ),
+        atol=1e-6,
+    )
+
+
+def test_unit_rotation_inputs_are_unchanged():
+    covariance, samples = prepare_rotation_inputs(
+        covariance=COVARIANCE_2D,
+        param_bounds=PARAM_BOUNDS_4D,
+        rotation_dims=[0, 2],
+        rotation_space="unit",
+    )
+
+    np.testing.assert_array_equal(
+        covariance,
+        COVARIANCE_2D,
+    )
+    assert samples is None
+
+
+def test_invalid_rotation_space_raises():
+    with pytest.raises(
+        ValueError,
+        match="rotation_space must be either 'physical' or 'unit'",
+    ):
+        prepare_rotation_inputs(
+            covariance=COVARIANCE_2D,
+            param_bounds=PARAM_BOUNDS_4D,
+            rotation_dims=[0, 2],
+            rotation_space="banana",
         )

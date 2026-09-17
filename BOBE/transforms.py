@@ -6,6 +6,39 @@ import jax.numpy as jnp
 from .utils.core import renormalise_log_weights
 
 
+def prepare_rotation_inputs(covariance=None, samples=None, param_bounds=None, rotation_dims=None, rotation_space="physical"):
+
+    if rotation_space not in ("physical", "unit"):
+        raise ValueError(
+            "rotation_space must be either 'physical' or 'unit'"
+        )
+
+    if (rotation_space == "unit" or sum(x is not None for x in (covariance, samples)) != 1):
+        return covariance, samples
+
+
+    source = jnp.asarray(covariance if covariance is not None else samples)
+
+    if (source.ndim != 2 or covariance is not None and source.shape[0] != source.shape[1]):
+        return covariance, samples
+
+    bounds = jnp.asarray(param_bounds)
+    input_ndim = source.shape[-1]
+
+    if input_ndim != bounds.shape[1]:
+        if rotation_dims is None or input_ndim != len(rotation_dims):
+            return covariance, samples
+        bounds = bounds[:, jnp.asarray(rotation_dims)]
+
+    lower, upper = bounds
+    widths = upper - lower
+
+    if covariance is not None:
+        return source / jnp.outer(widths, widths), None
+
+    return None, (source - lower) / widths
+
+
 class InputTransform(ABC):
     """
     Base interface for kernel input transforms.
