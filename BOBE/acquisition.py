@@ -172,12 +172,14 @@ class AcquisitionFunction:
 
         if n_batch > 1:
             # Create dummy GP without classifier functionality, for now we do not use batching for EI/LogEI
-            dummy_gp = GP(train_x=gp.train_x, 
-                         train_y=gp.train_y*gp.y_std + gp.y_mean,
-                         noise=gp.noise,
-                         kernel=gp.kernel_name,
-                         lengthscales=gp.lengthscales,
-                         kernel_variance=gp.kernel_variance,)
+            state = gp.state_dict()
+            dummy_gp = GP.from_state_dict(state)
+            # dummy_gp = GP(train_x=gp.train_x, 
+            #              train_y=gp.train_y*gp.y_std + gp.y_mean,
+            #              noise=gp.noise,
+            #              kernel=gp.kernel_name,
+            #              lengthscales=gp.lengthscales,
+            #              kernel_variance=gp.kernel_variance,)
                         
             dummy_gp.update(x_next, dummy_gp.predict_mean_single(x_next))
             for i in range(1,n_batch):

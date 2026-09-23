@@ -7,6 +7,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable
 # from .acquisition import WIPV, EI #, logEI
 from .gp import GP
 from .clf_gp import GPwithClassifier
+from .transforms import prepare_rotation_inputs
 from .likelihood import Likelihood, CobayaLikelihood
 from .utils.core import scale_from_unit, scale_to_unit,  resample_equal, kl_divergence_gaussian, get_threshold_for_nsigma
 from .utils.seed import set_global_seed, get_jax_key,  get_numpy_rng, get_new_jax_key
@@ -615,6 +616,18 @@ class BOBE:
         # Only main process creates and trains GP
         if not self.is_main:
             return
+
+        # Prepare rotation
+        gp_kwargs = gp_kwargs.copy()  # Avoid mutating input dict
+        gp_kwargs['rotation_covariance'], gp_kwargs["rotation_samples"] = (
+            prepare_rotation_inputs(
+                covariance=gp_kwargs.get('rotation_covariance'),
+                samples=gp_kwargs.get('rotation_samples'),
+                param_bounds=self.loglikelihood.param_bounds,
+                rotation_dims=gp_kwargs.get('rotation_dims'),
+                rotation_space=gp_kwargs.pop('rotation_space', 'physical')
+            )
+        )
         
         # Update GP kwargs with training data
         gp_kwargs.update({
