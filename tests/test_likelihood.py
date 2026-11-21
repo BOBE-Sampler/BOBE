@@ -66,7 +66,7 @@ def test_likelihood_single_evaluation():
     likelihood = Likelihood(
         loglikelihood=simple_loglike,
         param_list=['x', 'y'],
-        param_bounds=[(0, 1), (0, 1)]
+        param_bounds=np.array([(0, 1), (0, 1)]).T
     )
     
     x = np.array([0.5, 0.5])

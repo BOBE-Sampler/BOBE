@@ -53,11 +53,13 @@ class Likelihood:
             param_bounds = np.array(param_bounds)
             if param_bounds.shape != (2, self.ndim):
                 raise ValueError(f"param_bounds must have shape (2, {self.ndim}), but got {param_bounds.shape}.")
+            if not np.all(param_bounds[1] > param_bounds[0]):
+                raise ValueError("Upper parameter bounds must be strictly greater than lower bounds.")
             self.param_bounds = param_bounds
         
         self.name = name or "loglikelihood"
         self.minus_inf = minus_inf
-        self.logprior_vol = np.log(np.prod(self.param_bounds[1] - self.param_bounds[0]))
+        self.logprior_vol = float(np.sum(np.log(self.param_bounds[1] - self.param_bounds[0])))
 
         log.info(f"Initialized {self.name} with {self.ndim} params")
         log.info(f"Param list: {self.param_list}")

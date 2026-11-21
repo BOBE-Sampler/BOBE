@@ -170,7 +170,6 @@ def test_bobe_ei_2d():
         check_output_files(temp_dir, "rosenbrock_ei_test", check_chains=False)
         
         print("\n✓ EI test passed")
-        return results
         
     finally:
         # Clean up temporary directory
@@ -258,7 +257,6 @@ def test_bobe_wipstd_2d():
         check_output_files(temp_dir, "himmelblau_test", check_chains=True)
         
         print("\n✓ WIPStd test passed")
-        return results
         
     finally:
         # Clean up temporary directory
@@ -323,7 +321,6 @@ def test_bobe_with_classifier():
     print(f"Total evaluations: {results['gp'].train_x.shape[0]}")
     
     print("\n✓ Classifier test passed")
-    return results
 
 
 def test_bobe_custom_gp_kernel_and_physical_rotation(tmp_path):
@@ -361,7 +358,7 @@ def test_bobe_custom_gp_kernel_and_physical_rotation(tmp_path):
         param_bounds=param_bounds,
         likelihood_name='custom_gp_test',
         gp=gp,
-        n_sobol_init=6,
+        n_sobol_init=8,
         save=True,
         save_dir=str(tmp_path),
         seed=7,
@@ -372,7 +369,7 @@ def test_bobe_custom_gp_kernel_and_physical_rotation(tmp_path):
     assert bobe.gp.param_names == ['x', 'y']
     assert bobe.gp.kernel.input_transform.rotation is not None
     assert bobe.gp.kernel.input_transform.rotation.shape == (2, 2)
-    assert bobe.gp.npoints == 6
+    assert bobe.gp.npoints == 8
     bobe.pool.close()
 
     # Resume always restores from resume_file even if a different gp is passed
@@ -391,7 +388,7 @@ def test_bobe_custom_gp_kernel_and_physical_rotation(tmp_path):
     )
     assert isinstance(resumed.gp.kernel, MaternKernel)
     assert resumed.gp.kernel.input_transform is not None
-    assert resumed.gp.npoints == 6
+    assert resumed.gp.npoints == 8
     resumed.pool.close()
 
     # Pre-populated GP is rejected — custom initial points must go through BOBE

@@ -298,7 +298,7 @@ class EI(AcquisitionFunction):
             Negative expected improvement (for minimization).
         """
         mu, var = gp.predict(x, standardized=True)
-        var = jnp.clip(var, a_min=1e-20)  # prevent zero variance
+        var = jnp.clip(var, min=1e-20)  # prevent zero variance
         sigma = jnp.sqrt(var)
 
         u = _scaled_improvement(mu - zeta, sigma, best_y)
@@ -375,7 +375,7 @@ class LogEI(EI):
         Returns *positive* log-EI, so you can maximize directly.
         """
         mu, var = gp.predict(x, standardized=True)
-        var = jnp.clip(var, a_min=1e-18)  # prevent zero variance
+        var = jnp.clip(var, min=1e-18)  # prevent zero variance
         sigma = jnp.sqrt(var)
 
         u = _scaled_improvement(mu - zeta, sigma, best_y)
