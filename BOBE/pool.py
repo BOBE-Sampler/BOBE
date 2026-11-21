@@ -49,8 +49,9 @@ class MPI_Pool:
             self.is_main_process = True
             self.is_worker = False
         
-        # Track if workers are in waiting loop
+        # Track if workers are in waiting loop and whether pool has been closed
         self._workers_active = False
+        self._closed = False
         # Static vs dynamic task dispatch
         self.dynamic_dispatch = dynamic_dispatch
 
@@ -465,12 +466,13 @@ class MPI_Pool:
     def close(self):
         """
         Shut down the pool by telling all workers to exit.
-        
+
         Sends TASK_EXIT signal to all worker processes, allowing them to
-        exit from the worker_wait() loop gracefully.
+        exit from the worker_wait() loop gracefully. Safe to call multiple times.
         """
-        if self.is_worker:
+        if self.is_worker or self._closed:
             return
+        self._closed = True
         if self.is_mpi and self.size > 1:
             log.info("Sending exit signal to all workers")
             for i in range(1, self.size):

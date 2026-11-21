@@ -499,7 +499,7 @@ def test_batch_fantasy_gps_preserve_adapted_kernel_metric():
 
 @pytest.mark.parametrize(
     "gp_size, expected_restarts, expected_maxiters",
-    [(100, 8, 1000), (200, 4, 500), (500, 4, 500), (900, 4, 200)],
+    [(100, 8, 1000), (200, 8, 1000), (500, 8, 1000), (501, 4, 500), (900, 4, 500)],
 )
 def test_rotation_refit_uses_shared_gp_fit_policy(
     gp_size, expected_restarts, expected_maxiters

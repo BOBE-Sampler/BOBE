@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from BOBE.utils.core import (
+    get_R,
     kl_divergence_gaussian,
     principal_axes,
     regularize_covariance,
@@ -92,3 +93,35 @@ def test_weighted_mean_and_covariance():
         weighted_mean_and_covariance(base, weights=np.full(len(base), -1.0))
     with pytest.raises(ValueError, match="positive total weight"):
         weighted_mean_and_covariance(base, weights=np.zeros(len(base)))
+
+
+def test_get_R_gelman_rubin():
+    rng = np.random.default_rng(123)
+    # Identical distributions across 4 chains -> R-hat close to 1
+    converged = rng.normal(size=(4, 500, 3))
+    r_conv = get_R(converged)
+    assert np.isfinite(r_conv)
+    assert 0.99 <= r_conv <= 1.05
+
+    # Shifted chains -> R-hat clearly > 1
+    diverged = converged.copy()
+    diverged[0] += 5.0
+    diverged[1] -= 5.0
+    r_div = get_R(diverged)
+    assert r_div > 1.5
+
+    # 2D input (num_chains, num_samples) supported
+    r_2d = get_R(rng.normal(size=(3, 200)))
+    assert np.isfinite(r_2d) and 0.99 <= r_2d <= 1.1
+
+    # Single chain or single sample -> NaN
+    assert np.isnan(get_R(rng.normal(size=(1, 100, 2))))
+    assert np.isnan(get_R(rng.normal(size=(3, 1, 2))))
+
+    # Constant chains -> 1.0
+    assert get_R(np.ones((3, 50, 2))) == 1.0
+
+    # Wrong ndim raises
+    with pytest.raises(ValueError, match="2D or 3D"):
+        get_R(np.ones(10))
+

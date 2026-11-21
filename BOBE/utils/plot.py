@@ -32,7 +32,7 @@ except ImportError:
     HAS_GETDIST = False
     warnings.warn("GetDist not available. Triangle plots will be limited.")
 
-from .results import BOBEResults, load_bobe_results
+from .results import BOBEResults
 from .core import scale_from_unit, scale_to_unit
 from .log import get_logger
 
@@ -154,7 +154,7 @@ class BOBESummaryPlotter:
             figsize_scale: Scale factor for figure sizes (default: 1.0)
         """
         if isinstance(results, str):
-            self.results = load_bobe_results(results)
+            self.results = BOBEResults.load_results(results)
             self.output_file = results
         else:
             self.results = results

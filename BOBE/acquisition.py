@@ -519,15 +519,48 @@ class WIPStd(WeightedIntegratedPosteriorBase):
         return jnp.mean(std)
 
 
-def get_mc_samples(gp: GP,warmup_steps=512, num_samples=1024, thinning=4,method="NUTS",num_chains=4,np_rng=None,rng_key=None):
-    if method=='NUTS':
-        mc_samples = sample_GP_NUTS(gp=gp, warmup_steps=warmup_steps,
-            num_samples=num_samples, thinning=thinning, num_chains=num_chains,np_rng=np_rng,rng_key=rng_key
+def get_mc_samples(
+    gp: GP,
+    warmup_steps=512,
+    num_samples=1024,
+    thinning=4,
+    method="NUTS",
+    num_chains=4,
+    np_rng=None,
+    rng_key=None,
+    param_bounds=None,
+):
+    if method == 'NUTS':
+        mc_samples = sample_GP_NUTS(
+            gp=gp,
+            warmup_steps=warmup_steps,
+            num_samples=num_samples,
+            thinning=thinning,
+            num_chains=num_chains,
+            np_rng=np_rng,
+            rng_key=rng_key,
         )
-    elif method=='NS':
-        mc_samples, logz, success = nested_sampling_Dy(gp=gp, ndim=gp.ndim, mode = 'acq', maxcall=int(2e6),
-                                            dynamic=False, dlogz=0.02,equal_weights=True, rng=np_rng)
-    elif method=='uniform':
+    elif method == 'NS':
+        ns_samples, logz, success = nested_sampling_Dy(
+            gp=gp,
+            ndim=gp.ndim,
+            mode='acq',
+            maxcall=int(2e6),
+            dynamic=False,
+            dlogz=0.02,
+            rng=np_rng,
+            param_bounds=param_bounds,
+        )
+        mc_samples = {
+            'x': np.asarray(ns_samples['eq_u']),
+            'logp': np.asarray(ns_samples['eq_logl']),
+            'weights': np.ones(len(ns_samples['eq_u'])),
+            'best': ns_samples['best'],
+            'method': 'nested',
+        }
+        if param_bounds is not None:
+            mc_samples['x_physical'] = np.asarray(ns_samples['eq_x'])
+    elif method == 'uniform':
         mc_samples = {}
         points = qmc.Sobol(gp.ndim, scramble=True, rng=np_rng).random(num_samples)
         mc_samples['x'] = points
@@ -541,7 +574,7 @@ def get_mc_samples(gp: GP,warmup_steps=512, num_samples=1024, thinning=4,method=
         n_bad = np.sum(~valid_mask)
         log.warning(f"Filtered {n_bad} NaN samples from MC chain ({n_bad/len(samples)*100:.1f}%)")
         mc_samples['x'] = samples[valid_mask]
-        for key in ('weights', 'logp', 'logl'):
+        for key in ('x_physical', 'weights', 'logp', 'logl'):
             if key in mc_samples and len(mc_samples[key]) == len(valid_mask):
                 mc_samples[key] = np.asarray(mc_samples[key])[valid_mask]
 

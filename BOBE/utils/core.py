@@ -39,6 +39,43 @@ def is_cluster_environment():
     return False
 
 
+def get_R(samples):
+    """Compute Gelman-Rubin R-hat diagnostic for MCMC convergence.
+
+    Parameters
+    ----------
+    samples : array-like
+        MCMC samples of shape ``(num_chains, num_samples, num_parameters)``
+        or ``(num_chains, num_samples)``.
+
+    Returns
+    -------
+    float
+        Mean Gelman-Rubin R-hat across parameters, or ``np.nan`` if fewer
+        than 2 chains or fewer than 2 samples per chain are provided.
+    """
+    arr = np.asarray(samples, dtype=np.float64)
+    if arr.ndim == 2:
+        arr = arr[:, :, np.newaxis]
+    if arr.ndim != 3:
+        raise ValueError(
+            f"get_R expects 2D or 3D array (num_chains, num_samples[, num_params]), got shape {arr.shape}"
+        )
+    n_chains, n_samples, _ = arr.shape
+    if n_chains < 2 or n_samples < 2:
+        return float("nan")
+
+    chain_means = np.mean(arr, axis=1)                # (n_chains, n_params)
+    within = np.var(arr, axis=1, ddof=1)              # (n_chains, n_params)
+    W = np.mean(within, axis=0)                       # (n_params,)
+    between = np.var(chain_means, axis=0, ddof=1)     # (n_params,) = B / n_samples
+
+    var_hat = ((n_samples - 1) / n_samples) * W + (1.0 + 1.0 / n_chains) * between
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(W > 0.0, var_hat / W, np.where(between == 0.0, 1.0, np.inf))
+    return float(np.mean(np.sqrt(np.maximum(ratio, 0.0))))
+
+
 def renormalise_log_weights(log_weights):
     log_total = logsumexp(log_weights)
     normalized_weights = np.exp(log_weights - log_total)
