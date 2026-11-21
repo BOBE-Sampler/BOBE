@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import jax.numpy as jnp
 
-from BOBE.transforms import PrincipalAxesTransform, prepare_rotation_inputs
+from BOBE.transforms import PrincipalAxesTransform, scale_covariance_to_unit
 
 
 COVARIANCE_2D = jnp.array([
@@ -27,14 +27,6 @@ FULL_COVARIANCE_4D = jnp.array([
     [0.00, 0.00, 0.00, 0.25],
 ])
 
-SAMPLES_2D = jnp.array([
-    [0.10, 0.20],
-    [0.20, 0.35],
-    [0.40, 0.30],
-    [0.65, 0.75],
-    [0.90, 0.60],
-])
-
 PARAM_BOUNDS_4D = jnp.array([
     [10.0, -5.0, 100.0, 0.0],
     [20.0,  5.0, 300.0, 4.0],
@@ -43,32 +35,18 @@ PARAM_BOUNDS_4D = jnp.array([
 PARAM_WIDTHS_4D = PARAM_BOUNDS_4D[1] - PARAM_BOUNDS_4D[0]
 
 PHYSICAL_COVARIANCE_4D = (
-    FULL_COVARIANCE_4D
-    * jnp.outer(PARAM_WIDTHS_4D, PARAM_WIDTHS_4D)
+    FULL_COVARIANCE_4D * jnp.outer(PARAM_WIDTHS_4D, PARAM_WIDTHS_4D)
 )
 
 DIMS_02 = jnp.array([0, 2])
 
 PHYSICAL_COVARIANCE_02 = (
-    COVARIANCE_2D
-    * jnp.outer(
-        PARAM_WIDTHS_4D[DIMS_02],
-        PARAM_WIDTHS_4D[DIMS_02],
-    )
+    COVARIANCE_2D * jnp.outer(PARAM_WIDTHS_4D[DIMS_02], PARAM_WIDTHS_4D[DIMS_02])
 )
 
 
-def weighted_covariance(samples, weights):
-    weights = weights / jnp.sum(weights)
-    mean = jnp.sum(weights[:, None] * samples, axis=0)
-    centred = samples - mean
-    return (centred * weights[:, None]).T @ centred
-
-
 def squared_transformed_difference(transform, xa, xb):
-    za = transform.forward(xa)
-    zb = transform.forward(xb)
-    return jnp.square(za - zb)
+    return jnp.square(transform.forward(xa) - transform.forward(xb))
 
 
 def test_covariance_rotation_diagonalises_covariance():
@@ -76,20 +54,10 @@ def test_covariance_rotation_diagonalises_covariance():
         covariance=COVARIANCE_2D,
         param_bounds=UNIT_BOUNDS_2D,
     )
-
-    rotated_covariance = (
-        transform.rotation.T
-        @ COVARIANCE_2D
-        @ transform.rotation
-    )
-
+    rotated_covariance = transform.rotation.T @ COVARIANCE_2D @ transform.rotation
     np.testing.assert_allclose(
-        rotated_covariance
-        - jnp.diag(jnp.diag(rotated_covariance)),
-        0.0,
-        atol=1e-6,
+        rotated_covariance - jnp.diag(jnp.diag(rotated_covariance)), 0.0, atol=1e-6
     )
-
     assert rotated_covariance[0, 0] >= rotated_covariance[1, 1]
 
 
@@ -98,20 +66,8 @@ def test_forward_inverse_round_trip():
         covariance=COVARIANCE_2D,
         param_bounds=UNIT_BOUNDS_2D,
     )
-
-    x = jnp.array([
-        [0.10, 0.25],
-        [0.40, 0.70],
-        [0.85, 0.30],
-    ])
-
-    restored = transform.inverse(transform.forward(x))
-
-    np.testing.assert_allclose(
-        restored,
-        x,
-        atol=1e-6,
-    )
+    x = jnp.array([[0.10, 0.25], [0.40, 0.70], [0.85, 0.30]])
+    np.testing.assert_allclose(transform.inverse(transform.forward(x)), x, atol=1e-6)
 
 
 def test_partial_rotation_leaves_unselected_dimensions_unchanged():
@@ -120,40 +76,10 @@ def test_partial_rotation_leaves_unselected_dimensions_unchanged():
         rotation_dims=[0, 2],
         param_bounds=UNIT_BOUNDS_4D,
     )
-
-    x = jnp.array([
-        [0.10, 0.20, 0.30, 0.40],
-        [0.50, 0.60, 0.70, 0.80],
-    ])
-
+    x = jnp.array([[0.10, 0.20, 0.30, 0.40], [0.50, 0.60, 0.70, 0.80]])
     transformed = transform.forward(x)
-
-    np.testing.assert_allclose(
-        transformed[:, [1, 3]],
-        x[:, [1, 3]],
-        atol=1e-6,
-    )
-
-
-def test_partial_rotation_forward_inverse_round_trip():
-    transform = PrincipalAxesTransform(
-        covariance=COVARIANCE_2D,
-        rotation_dims=[0, 2],
-        param_bounds=UNIT_BOUNDS_4D,
-    )
-
-    x = jnp.array([
-        [0.10, 0.20, 0.30, 0.40],
-        [0.50, 0.60, 0.70, 0.80],
-    ])
-
-    restored = transform.inverse(transform.forward(x))
-
-    np.testing.assert_allclose(
-        restored,
-        x,
-        atol=1e-6,
-    )
+    np.testing.assert_allclose(transformed[:, [1, 3]], x[:, [1, 3]], atol=1e-6)
+    np.testing.assert_allclose(transform.inverse(transformed), x, atol=1e-6)
 
 
 def test_full_and_reduced_covariance_give_same_metric():
@@ -162,174 +88,16 @@ def test_full_and_reduced_covariance_give_same_metric():
         rotation_dims=[0, 2],
         param_bounds=UNIT_BOUNDS_4D,
     )
-
     reduced_transform = PrincipalAxesTransform(
         covariance=COVARIANCE_2D,
         rotation_dims=[0, 2],
         param_bounds=UNIT_BOUNDS_4D,
     )
-
     xa = jnp.array([0.15, 0.20, 0.35, 0.40])
     xb = jnp.array([0.75, 0.60, 0.55, 0.80])
-
-    full_difference = squared_transformed_difference(
-        full_transform,
-        xa,
-        xb,
-    )
-
-    reduced_difference = squared_transformed_difference(
-        reduced_transform,
-        xa,
-        xb,
-    )
-
     np.testing.assert_allclose(
-        full_difference,
-        reduced_difference,
-        atol=1e-6,
-    )
-
-
-def test_samples_and_covariance_give_same_metric():
-    covariance = weighted_covariance(
-        SAMPLES_2D,
-        jnp.ones(SAMPLES_2D.shape[0]),
-    )
-
-    sample_transform = PrincipalAxesTransform(
-        samples=SAMPLES_2D,
-        param_bounds=UNIT_BOUNDS_2D,
-    )
-
-    covariance_transform = PrincipalAxesTransform(
-        covariance=covariance,
-        param_bounds=UNIT_BOUNDS_2D,
-    )
-
-    xa = jnp.array([0.15, 0.25])
-    xb = jnp.array([0.80, 0.65])
-
-    np.testing.assert_allclose(
-        squared_transformed_difference(
-            sample_transform,
-            xa,
-            xb,
-        ),
-        squared_transformed_difference(
-            covariance_transform,
-            xa,
-            xb,
-        ),
-        atol=1e-6,
-    )
-
-
-def test_weighted_samples_and_covariance_give_same_metric():
-    weights = jnp.array([1.0, 2.0, 4.0, 3.0, 5.0])
-
-    covariance = weighted_covariance(
-        SAMPLES_2D,
-        weights,
-    )
-
-    sample_transform = PrincipalAxesTransform(
-        samples=SAMPLES_2D,
-        weights=weights,
-        param_bounds=UNIT_BOUNDS_2D,
-    )
-
-    covariance_transform = PrincipalAxesTransform(
-        covariance=covariance,
-        param_bounds=UNIT_BOUNDS_2D,
-    )
-
-    xa = jnp.array([0.20, 0.30])
-    xb = jnp.array([0.70, 0.85])
-
-    np.testing.assert_allclose(
-        squared_transformed_difference(
-            sample_transform,
-            xa,
-            xb,
-        ),
-        squared_transformed_difference(
-            covariance_transform,
-            xa,
-            xb,
-        ),
-        atol=1e-6,
-    )
-
-
-def test_log_weights_and_weights_give_same_metric():
-    weights = jnp.array([1.0, 2.0, 4.0, 3.0, 5.0])
-    log_weights = jnp.log(weights)
-
-    weighted_transform = PrincipalAxesTransform(
-        samples=SAMPLES_2D,
-        weights=weights,
-        param_bounds=UNIT_BOUNDS_2D,
-    )
-
-    log_weighted_transform = PrincipalAxesTransform(
-        samples=SAMPLES_2D,
-        log_weights=log_weights,
-        param_bounds=UNIT_BOUNDS_2D,
-    )
-
-    xa = jnp.array([0.20, 0.30])
-    xb = jnp.array([0.70, 0.85])
-
-    np.testing.assert_allclose(
-        squared_transformed_difference(
-            weighted_transform,
-            xa,
-            xb,
-        ),
-        squared_transformed_difference(
-            log_weighted_transform,
-            xa,
-            xb,
-        ),
-        atol=1e-6,
-    )
-
-
-def test_samples_can_be_supplied_as_reduced_chain():
-    full_samples = jnp.column_stack([
-        SAMPLES_2D[:, 0],
-        jnp.linspace(0.1, 0.9, SAMPLES_2D.shape[0]),
-        SAMPLES_2D[:, 1],
-        jnp.linspace(0.9, 0.1, SAMPLES_2D.shape[0]),
-    ])
-
-    full_transform = PrincipalAxesTransform(
-        samples=full_samples,
-        rotation_dims=[0, 2],
-        param_bounds=UNIT_BOUNDS_4D,
-    )
-
-    reduced_transform = PrincipalAxesTransform(
-        samples=SAMPLES_2D,
-        rotation_dims=[0, 2],
-        param_bounds=UNIT_BOUNDS_4D,
-    )
-
-    xa = jnp.array([0.15, 0.20, 0.35, 0.40])
-    xb = jnp.array([0.75, 0.60, 0.55, 0.80])
-
-    np.testing.assert_allclose(
-        squared_transformed_difference(
-            full_transform,
-            xa,
-            xb,
-        ),
-        squared_transformed_difference(
-            reduced_transform,
-            xa,
-            xb,
-        ),
+        squared_transformed_difference(full_transform, xa, xb),
+        squared_transformed_difference(reduced_transform, xa, xb),
         atol=1e-6,
     )
 
@@ -340,95 +108,21 @@ def test_state_dict_round_trip():
         rotation_dims=[0, 2],
         param_bounds=UNIT_BOUNDS_4D,
     )
-
-    restored = PrincipalAxesTransform.from_state_dict(
-        transform.state_dict()
-    )
-
-    x = jnp.array([
-        [0.10, 0.20, 0.30, 0.40],
-        [0.50, 0.60, 0.70, 0.80],
-    ])
-
-    np.testing.assert_allclose(
-        restored.forward(x),
-        transform.forward(x),
-        atol=1e-6,
-    )
-
-    np.testing.assert_array_equal(
-        restored.rotation_dims,
-        transform.rotation_dims,
-    )
+    restored = PrincipalAxesTransform.from_state_dict(transform.state_dict())
+    x = jnp.array([[0.10, 0.20, 0.30, 0.40], [0.50, 0.60, 0.70, 0.80]])
+    np.testing.assert_allclose(restored.forward(x), transform.forward(x), atol=1e-6)
+    np.testing.assert_array_equal(restored.rotation_dims, transform.rotation_dims)
 
 
-def test_requires_exactly_one_rotation_source():
-    with pytest.raises(
-        ValueError,
-        match="Provide exactly one of covariance or samples",
-    ):
+def test_static_transform_requires_covariance():
+    with pytest.raises(ValueError, match="Provide covariance"):
         PrincipalAxesTransform()
-
-    with pytest.raises(
-        ValueError,
-        match="Provide exactly one of covariance or samples",
-    ):
-        PrincipalAxesTransform(
-            covariance=COVARIANCE_2D,
-            samples=SAMPLES_2D,
-        )
-
-
-def test_weights_and_log_weights_are_mutually_exclusive():
-    weights = jnp.ones(SAMPLES_2D.shape[0])
-
-    with pytest.raises(
-        ValueError,
-        match="Provide either weights or log_weights",
-    ):
-        PrincipalAxesTransform(
-            samples=SAMPLES_2D,
-            weights=weights,
-            log_weights=jnp.log(weights),
-        )
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"weights": jnp.ones(2)},
-        {"log_weights": jnp.zeros(2)},
-    ],
-)
-def test_weights_require_samples(kwargs):
-    with pytest.raises(
-        ValueError,
-        match="can only be used with samples",
-    ):
-        PrincipalAxesTransform(
-            covariance=COVARIANCE_2D,
-            **kwargs,
-        )
 
 
 def test_covariance_must_be_square():
-    with pytest.raises(
-        ValueError,
-        match="Covariance matrix must be square",
-    ):
+    with pytest.raises(ValueError, match="Covariance matrix must be square"):
         PrincipalAxesTransform(
             covariance=jnp.ones((2, 3)),
-            param_bounds=UNIT_BOUNDS_2D,
-        )
-
-
-def test_samples_must_be_two_dimensional():
-    with pytest.raises(
-        ValueError,
-        match=r"samples must have shape \(N, D\)",
-    ):
-        PrincipalAxesTransform(
-            samples=jnp.ones(5),
             param_bounds=UNIT_BOUNDS_2D,
         )
 
@@ -451,10 +145,7 @@ def test_invalid_rotation_dims(rotation_dims, message):
 
 
 def test_rotation_dims_must_be_compatible_with_covariance():
-    with pytest.raises(
-        ValueError,
-        match="incompatible",
-    ):
+    with pytest.raises(ValueError, match="incompatible"):
         PrincipalAxesTransform(
             covariance=COVARIANCE_2D,
             rotation_dims=[0, 1, 3],
@@ -462,104 +153,18 @@ def test_rotation_dims_must_be_compatible_with_covariance():
         )
 
 
-def test_rotation_dims_must_be_compatible_with_samples():
-    with pytest.raises(
-        ValueError,
-        match="incompatible",
-    ):
-        PrincipalAxesTransform(
-            samples=SAMPLES_2D,
-            rotation_dims=[0, 1, 3],
-            param_bounds=UNIT_BOUNDS_4D,
-        )
+def test_scale_physical_covariance_to_unit_space():
+    cov = scale_covariance_to_unit(PHYSICAL_COVARIANCE_4D, PARAM_BOUNDS_4D)
+    np.testing.assert_allclose(cov, FULL_COVARIANCE_4D, atol=1e-6)
 
-
-def test_sample_weights_must_have_correct_shape():
-    with pytest.raises(
-        ValueError,
-        match=r"weights must have shape \(N,\)",
-    ):
-        PrincipalAxesTransform(
-            samples=SAMPLES_2D,
-            weights=jnp.ones(3),
-            param_bounds=UNIT_BOUNDS_2D,
-        )
-
-
-def test_log_weights_must_have_correct_shape():
-    with pytest.raises(
-        ValueError,
-        match=r"log_weights must have shape \(N,\)",
-    ):
-        PrincipalAxesTransform(
-            samples=SAMPLES_2D,
-            log_weights=jnp.ones(3),
-            param_bounds=UNIT_BOUNDS_2D,
-        )
-
-
-def test_sample_weights_must_be_non_negative():
-    weights = jnp.array([1.0, 1.0, -1.0, 1.0, 1.0])
-
-    with pytest.raises(
-        ValueError,
-        match="non-negative",
-    ):
-        PrincipalAxesTransform(
-            samples=SAMPLES_2D,
-            weights=weights,
-            param_bounds=UNIT_BOUNDS_2D,
-        )
-
-
-def test_sample_weights_must_have_positive_total():
-    weights = jnp.zeros(SAMPLES_2D.shape[0])
-
-    with pytest.raises(
-        ValueError,
-        match="positive total weight",
-    ):
-        PrincipalAxesTransform(
-            samples=SAMPLES_2D,
-            weights=weights,
-            param_bounds=UNIT_BOUNDS_2D,
-        )
-
-
-def test_prepare_physical_covariance_to_unit_space():
-    covariance, samples = prepare_rotation_inputs(
-        covariance=PHYSICAL_COVARIANCE_4D,
-        param_bounds=PARAM_BOUNDS_4D,
+    sub_from_full = scale_covariance_to_unit(
+        PHYSICAL_COVARIANCE_4D, PARAM_BOUNDS_4D, dims=[0, 2]
     )
-
-    np.testing.assert_allclose(
-        covariance,
-        FULL_COVARIANCE_4D,
-        atol=1e-6,
+    sub_from_reduced = scale_covariance_to_unit(
+        PHYSICAL_COVARIANCE_02, PARAM_BOUNDS_4D, dims=[0, 2]
     )
-    assert samples is None
-
-
-def test_prepare_physical_samples_to_unit_space():
-    physical_samples = (
-        PARAM_BOUNDS_4D[0, DIMS_02]
-        + SAMPLES_2D
-        * PARAM_WIDTHS_4D[DIMS_02]
-    )
-
-    covariance, samples = prepare_rotation_inputs(
-        samples=physical_samples,
-        param_bounds=PARAM_BOUNDS_4D,
-        rotation_dims=[0, 2],
-    )
-
-    assert covariance is None
-
-    np.testing.assert_allclose(
-        samples,
-        SAMPLES_2D,
-        atol=1e-6,
-    )
+    np.testing.assert_allclose(sub_from_full, COVARIANCE_2D, atol=1e-6)
+    np.testing.assert_allclose(sub_from_reduced, COVARIANCE_2D, atol=1e-6)
 
 
 def test_full_and_reduced_physical_covariance_give_same_rotation():
@@ -568,90 +173,32 @@ def test_full_and_reduced_physical_covariance_give_same_rotation():
         rotation_dims=[0, 2],
         param_bounds=PARAM_BOUNDS_4D,
     )
-
     reduced_transform = PrincipalAxesTransform(
         covariance=PHYSICAL_COVARIANCE_02,
         rotation_dims=[0, 2],
         param_bounds=PARAM_BOUNDS_4D,
     )
-
     xa = jnp.array([0.15, 0.20, 0.35, 0.40])
     xb = jnp.array([0.75, 0.60, 0.55, 0.80])
-
     np.testing.assert_allclose(
-        squared_transformed_difference(
-            full_transform,
-            xa,
-            xb,
-        ),
-        squared_transformed_difference(
-            reduced_transform,
-            xa,
-            xb,
-        ),
+        squared_transformed_difference(full_transform, xa, xb),
+        squared_transformed_difference(reduced_transform, xa, xb),
         atol=1e-6,
     )
 
 
-def test_full_and_reduced_physical_samples_give_same_rotation():
-    full_samples = jnp.column_stack([
-        SAMPLES_2D[:, 0],
-        jnp.linspace(0.1, 0.9, SAMPLES_2D.shape[0]),
-        SAMPLES_2D[:, 1],
-        jnp.linspace(0.9, 0.1, SAMPLES_2D.shape[0]),
-    ])
-
-    physical_full_samples = (
-        PARAM_BOUNDS_4D[0]
-        + full_samples * PARAM_WIDTHS_4D
-    )
-
-    physical_reduced_samples = (
-        PARAM_BOUNDS_4D[0, DIMS_02]
-        + SAMPLES_2D
-        * PARAM_WIDTHS_4D[DIMS_02]
-    )
-
-    full_transform = PrincipalAxesTransform(
-        samples=physical_full_samples,
-        rotation_dims=[0, 2],
-        param_bounds=PARAM_BOUNDS_4D,
-    )
-
-    reduced_transform = PrincipalAxesTransform(
-        samples=physical_reduced_samples,
-        rotation_dims=[0, 2],
-        param_bounds=PARAM_BOUNDS_4D,
-    )
-
-    xa = jnp.array([0.15, 0.20, 0.35, 0.40])
-    xb = jnp.array([0.75, 0.60, 0.55, 0.80])
-
-    np.testing.assert_allclose(
-        squared_transformed_difference(
-            full_transform,
-            xa,
-            xb,
-        ),
-        squared_transformed_difference(
-            reduced_transform,
-            xa,
-            xb,
-        ),
-        atol=1e-6,
-    )
-
-
-def test_physical_space_transform_deferred_bind_and_named_dims():
+def test_physical_space_transform_deferred_initialize_and_named_dims():
     transform = PrincipalAxesTransform(
         covariance=PHYSICAL_COVARIANCE_02,
         rotation_dims=["a", "c"],
     )
     assert transform.rotation is None
-    with pytest.raises(RuntimeError, match="not bound"):
+    with pytest.raises(RuntimeError, match="not initialized"):
         transform.forward(jnp.ones((2, 4)))
+    with pytest.raises(RuntimeError, match="not initialized"):
+        transform.inverse(jnp.ones((2, 4)))
 
-    transform.bind_space(PARAM_BOUNDS_4D, param_names=["a", "b", "c", "d"])
+    transform.initialize(param_bounds=PARAM_BOUNDS_4D, param_names=["a", "b", "c", "d"])
     assert transform.rotation is not None
     np.testing.assert_array_equal(transform.rotation_dims, jnp.array([0, 2]))
 
@@ -667,3 +214,315 @@ def test_physical_space_transform_deferred_bind_and_named_dims():
         squared_transformed_difference(reference, xa, xb),
         atol=1e-6,
     )
+
+
+# ---------------------------------------------------------------------------
+# Adaptive PrincipalAxesTransform tests
+# ---------------------------------------------------------------------------
+
+def _gaussian_mc_samples(seed=1, mean=None, scale=1.0, n=500):
+    rng = np.random.default_rng(seed)
+    mean = np.array([0.4, 0.5, 0.6]) if mean is None else np.asarray(mean)
+    base = np.array([
+        [0.04, 0.025, 0.010],
+        [0.025, 0.09, -0.015],
+        [0.010, -0.015, 0.06],
+    ])
+    return {"x": rng.multivariate_normal(mean, scale * base, size=n), "method": "MCMC"}
+
+
+def test_default_is_static_and_try_update_is_noop():
+    transform = PrincipalAxesTransform(
+        covariance=COVARIANCE_2D,
+        param_bounds=UNIT_BOUNDS_2D,
+    )
+    assert not transform.adaptive
+    assert transform.max_updates == 0
+    assert not transform.try_update(
+        {"x": np.random.default_rng(0).normal(0.5, 0.1, size=(100, 2))},
+        acq_val=0.01,
+        step=1,
+        acq_threshold=1.0,
+    )
+    assert transform.update_count == 0
+
+
+def test_adaptive_without_initial_covariance_starts_as_identity():
+    transform = PrincipalAxesTransform(
+        update_dims=[0, 1, 2],
+        max_updates=3,
+        acq_threshold=0.5,
+    )
+    assert transform.adaptive
+    assert transform.rotation is not None
+    np.testing.assert_allclose(transform.rotation, np.eye(3))
+
+    deferred = PrincipalAxesTransform(max_updates=2, acq_threshold=0.5)
+    assert deferred.rotation is None
+    deferred.initialize(ndim=3)
+    np.testing.assert_array_equal(deferred.update_dims, jnp.array([0, 1, 2]))
+    np.testing.assert_allclose(deferred.rotation, np.eye(3))
+
+    named = PrincipalAxesTransform(update_dims=["a", "c"], max_updates=2)
+    assert named.rotation is None
+    named.initialize(param_bounds=PARAM_BOUNDS_4D, param_names=["a", "b", "c", "d"])
+    np.testing.assert_array_equal(named.update_dims, jnp.array([0, 2]))
+    np.testing.assert_allclose(named.rotation, np.eye(2))
+
+
+def test_subspace_covariance_is_embedded_in_larger_update_space():
+    transform = PrincipalAxesTransform(
+        covariance=PHYSICAL_COVARIANCE_02,
+        initial_dims=[0, 2],
+        update_dims=[0, 2, 3],
+        param_bounds=PARAM_BOUNDS_4D,
+        max_updates=2,
+        acq_threshold=0.5,
+    )
+    assert transform.rotation.shape == (3, 3)
+    np.testing.assert_allclose(transform.rotation[2], [0.0, 0.0, 1.0])
+    np.testing.assert_allclose(transform.rotation[:, 2], [0.0, 0.0, 1.0])
+
+    ref = PrincipalAxesTransform(
+        covariance=PHYSICAL_COVARIANCE_02,
+        rotation_dims=[0, 2],
+        param_bounds=PARAM_BOUNDS_4D,
+    )
+    xa = jnp.array([0.15, 0.20, 0.35, 0.40])
+    xb = jnp.array([0.75, 0.60, 0.55, 0.80])
+    np.testing.assert_allclose(
+        squared_transformed_difference(transform, xa, xb),
+        squared_transformed_difference(ref, xa, xb),
+        atol=1e-6,
+    )
+    transformed = transform.forward(xa[None, :])
+    np.testing.assert_allclose(transformed[:, 1], xa[1])
+    np.testing.assert_allclose(transformed[:, 3], xa[3])
+
+
+def test_deferred_named_initial_and_update_dims_with_physical_covariance():
+    transform = PrincipalAxesTransform(
+        covariance=PHYSICAL_COVARIANCE_02,
+        initial_dims=["a", "c"],
+        update_dims=["a", "c", "d"],
+        max_updates=3,
+        acq_threshold=0.5,
+    )
+    assert transform.rotation is None
+    transform.initialize(param_bounds=PARAM_BOUNDS_4D, param_names=["a", "b", "c", "d"])
+    np.testing.assert_array_equal(transform.initial_dims, jnp.array([0, 2]))
+    np.testing.assert_array_equal(transform.update_dims, jnp.array([0, 2, 3]))
+    assert transform.rotation.shape == (3, 3)
+    np.testing.assert_allclose(transform.rotation[2], [0.0, 0.0, 1.0])
+
+
+def test_subset_initial_covariance_adapts_over_all_parameters():
+    transform = PrincipalAxesTransform(
+        covariance=PHYSICAL_COVARIANCE_02,
+        initial_dims=["a", "c"],
+        max_updates=3,
+        acq_threshold=0.5,
+    )
+    assert transform.rotation is None
+    transform.initialize(param_bounds=PARAM_BOUNDS_4D, param_names=["a", "b", "c", "d"])
+
+    np.testing.assert_array_equal(transform.initial_dims, jnp.array([0, 2]))
+    np.testing.assert_array_equal(transform.update_dims, jnp.array([0, 1, 2, 3]))
+    assert transform.rotation.shape == (4, 4)
+    # Uninitialized dims 1 and 3 start as identity axes
+    np.testing.assert_allclose(transform.rotation[1], [0.0, 1.0, 0.0, 0.0])
+    np.testing.assert_allclose(transform.rotation[3], [0.0, 0.0, 0.0, 1.0])
+    # Embedded [0, 2] block matches standalone 2D rotation
+    ref = PrincipalAxesTransform(
+        covariance=PHYSICAL_COVARIANCE_02,
+        rotation_dims=[0, 2],
+        param_bounds=PARAM_BOUNDS_4D,
+    )
+    np.testing.assert_allclose(
+        transform.rotation[np.ix_([0, 2], [0, 2])], ref.rotation, atol=1e-6
+    )
+
+    # Adaptive update replaces the embedded rotation with a full 4D rotation
+    rng = np.random.default_rng(13)
+    cov_4d = np.array([
+        [0.04, 0.02, 0.01, -0.01],
+        [0.02, 0.05, 0.015, 0.02],
+        [0.01, 0.015, 0.06, -0.015],
+        [-0.01, 0.02, -0.015, 0.03],
+    ])
+    mc = {"x": rng.multivariate_normal(np.full(4, 0.5), cov_4d, size=300)}
+    assert transform.try_update(mc, acq_val=0.4, step=1)
+    assert transform.update_count == 1
+    assert transform.reference_covariance.shape == (4, 4)
+    assert not np.allclose(transform.rotation[1], [0.0, 1.0, 0.0, 0.0])
+    assert not np.allclose(transform.rotation[3], [0.0, 0.0, 0.0, 1.0])
+
+
+def test_first_adaptive_update_is_gated_only_by_acquisition():
+    transform = PrincipalAxesTransform(
+        covariance=np.eye(2),
+        initial_dims=[0, 1],
+        update_dims=[0, 1, 2],
+        param_bounds=jnp.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]),
+        acq_threshold=0.5,
+        update_step=100,
+        max_updates=3,
+        kl_threshold=1e6,
+    )
+    assert not transform.try_update(_gaussian_mc_samples(), acq_val=0.6, step=1)
+    assert transform.try_update(_gaussian_mc_samples(), acq_val=0.4, step=1)
+    assert transform.update_count == 1
+    assert transform.reference_covariance.shape == (3, 3)
+    assert transform.last_update_kl is None
+    assert transform.last_update_ii == 1
+    assert transform.last_update_acq_val == pytest.approx(0.4)
+
+
+def test_later_adaptive_updates_apply_gap_improvement_kl_and_max_updates_gates():
+    transform = PrincipalAxesTransform(
+        update_dims=[0, 1, 2],
+        acq_threshold=0.5,
+        update_step=5,
+        max_updates=2,
+        kl_threshold=0.1,
+    )
+    baseline = _gaussian_mc_samples(seed=2)
+    assert transform.try_update(baseline, acq_val=0.4, step=1)
+
+    changed = _gaussian_mc_samples(seed=3, mean=[0.9, 0.5, 0.6])
+    assert not transform.try_update(changed, acq_val=0.3, step=4)   # step gap
+    assert not transform.try_update(changed, acq_val=0.6, step=6)   # above threshold
+    assert not transform.try_update(changed, acq_val=0.45, step=6)  # no acq improvement
+    assert not transform.try_update(baseline, acq_val=0.3, step=6)  # KL too small
+    assert transform.try_update(changed, acq_val=0.3, step=6)
+    assert transform.update_count == 2
+    assert transform.last_update_kl >= transform.kl_threshold
+
+    further = _gaussian_mc_samples(seed=4, mean=[0.1, 0.1, 0.1])
+    assert not transform.try_update(further, acq_val=0.1, step=20)
+    assert transform.update_count == 2
+
+
+def test_kl_accepts_scale_change_even_when_eigenvectors_do_not_change():
+    transform = PrincipalAxesTransform(
+        update_dims=[0, 1, 2],
+        acq_threshold=0.5,
+        update_step=1,
+        max_updates=2,
+        kl_threshold=0.1,
+    )
+    baseline = _gaussian_mc_samples(seed=8)
+    assert transform.try_update(baseline, acq_val=0.4, step=1)
+    samples = baseline["x"]
+    scaled = {"x": samples.mean(axis=0) + 2.0 * (samples - samples.mean(axis=0))}
+    assert transform.try_update(scaled, acq_val=0.3, step=2)
+    assert transform.last_update_kl > transform.kl_threshold
+
+
+def test_update_step_none_allows_only_first_update():
+    transform = PrincipalAxesTransform(
+        update_dims=[0, 1, 2],
+        acq_threshold=0.5,
+        update_step=None,
+        max_updates=5,
+        kl_threshold=0.0,
+    )
+    assert transform.try_update(_gaussian_mc_samples(seed=1), acq_val=0.4, step=1)
+    assert not transform.try_update(
+        _gaussian_mc_samples(seed=2, mean=[0.9, 0.1, 0.2]), acq_val=0.1, step=100
+    )
+    assert transform.update_count == 1
+
+
+def test_hungarian_axis_alignment_preserves_axis_order_and_signs():
+    rng = np.random.default_rng(11)
+    q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    permuted = q[:, [2, 0, 1]] * np.array([-1.0, 1.0, -1.0])
+    aligned = PrincipalAxesTransform._align_axes(q, permuted)
+    np.testing.assert_allclose(aligned, q, atol=1e-12)
+
+
+def test_adaptive_update_handles_weights_nans_and_round_trip():
+    mc = _gaussian_mc_samples(seed=5, n=200)
+    mc["x"][0, 1] = np.nan
+    weights = np.ones(200)
+    weights[1] = np.nan
+    mc["weights"] = weights
+
+    transform = PrincipalAxesTransform(
+        update_dims=[0, 2],
+        acq_threshold=1.0,
+        max_updates=2,
+    )
+    assert transform.try_update(mc, acq_val=0.5, step=2)
+    x_np = np.array([[0.1, 0.2, 0.3], [0.7, 0.8, 0.9]])
+    forward = transform.forward(x_np)
+    np.testing.assert_allclose(forward[:, 1], x_np[:, 1], atol=1e-12)
+    np.testing.assert_allclose(transform.inverse(forward), x_np, atol=1e-12)
+
+
+def test_adaptive_state_dict_round_trip():
+    transform = PrincipalAxesTransform(
+        covariance=PHYSICAL_COVARIANCE_02,
+        initial_dims=[0, 2],
+        update_dims=[0, 2, 3],
+        param_bounds=PARAM_BOUNDS_4D,
+        acq_threshold=0.5,
+        update_step=4,
+        max_updates=3,
+        kl_threshold=0.2,
+        regularize_eps=1e-8,
+    )
+    rng = np.random.default_rng(7)
+    mc = {"x": rng.multivariate_normal(np.full(4, 0.5), 0.02 * np.eye(4), size=200)}
+    assert transform.try_update(mc, acq_val=0.3, step=5)
+
+    restored = PrincipalAxesTransform.from_state_dict(transform.state_dict())
+    assert restored.adaptive is True
+    assert restored.update_count == 1
+    assert restored.last_update_ii == 5
+    assert restored.last_update_acq_val == pytest.approx(0.3)
+    assert restored.last_update_kl is None
+    assert restored.acq_threshold == pytest.approx(0.5)
+    assert restored.update_step == 4
+    assert restored.max_updates == 3
+    assert restored.kl_threshold == pytest.approx(0.2)
+    assert restored.regularize_eps == pytest.approx(1e-8)
+    np.testing.assert_array_equal(restored.initial_dims, transform.initial_dims)
+    np.testing.assert_array_equal(restored.update_dims, transform.update_dims)
+    np.testing.assert_allclose(restored.rotation, transform.rotation)
+    np.testing.assert_allclose(restored.reference_mean, transform.reference_mean)
+    np.testing.assert_allclose(
+        restored.reference_covariance, transform.reference_covariance
+    )
+
+
+def test_adaptive_invalid_arguments_are_rejected():
+    with pytest.raises(ValueError, match="max_updates"):
+        PrincipalAxesTransform(covariance=COVARIANCE_2D, max_updates=-1)
+    with pytest.raises(ValueError, match="update_step"):
+        PrincipalAxesTransform(update_dims=[0, 1], max_updates=2, update_step=0)
+    with pytest.raises(ValueError, match="kl_threshold"):
+        PrincipalAxesTransform(update_dims=[0, 1], max_updates=2, kl_threshold=-0.1)
+    with pytest.raises(ValueError, match="regularize_eps"):
+        PrincipalAxesTransform(update_dims=[0, 1], max_updates=2, regularize_eps=-1e-6)
+    with pytest.raises(ValueError, match="not both"):
+        PrincipalAxesTransform(
+            rotation_dims=[0, 1], update_dims=[0, 1], max_updates=2
+        )
+    with pytest.raises(ValueError, match="subset"):
+        PrincipalAxesTransform(
+            covariance=COVARIANCE_2D,
+            initial_dims=[0, 3],
+            update_dims=[0, 1, 2],
+            max_updates=2,
+        )
+    transform = PrincipalAxesTransform(update_dims=[0, 1], max_updates=2)
+    with pytest.raises(ValueError, match="acq_threshold"):
+        transform.try_update(_gaussian_mc_samples(), acq_val=0.2, step=1)
+
+    transform = PrincipalAxesTransform(
+        update_dims=[0, 1, 2], max_updates=2, acq_threshold=1.0
+    )
+    with pytest.raises(ValueError, match="finite posterior samples"):
+        transform.try_update({"x": np.zeros((3, 3))}, acq_val=0.2, step=1)

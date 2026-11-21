@@ -43,7 +43,8 @@ def get_dimension_based_defaults(ndim: int):
         'mc_points_size': min(512, 32*ndim),  # more MC points for higher dimensions
         'num_chains': min(6, max(3,jax.device_count())),  # 3-6 chains depending on available devices
         'fit_n_points': min(50, 2*ndim),  # refit less often for higher dimensions
-        'logz_threshold': 0.01 + 0.01*(ndim/6) if ndim<=6 else min(1.,0.1 + 0.1*(ndim/6)**2)  # looser threshold for higher dimensions
+        'logz_threshold': 0.01 + 0.01*(ndim/6) if ndim<=6 else min(1.,0.1 + 0.1*(ndim/6)**2),  # looser threshold for higher dimensions
+        'transform_acq_threshold': min(5, 2 * (ndim / 10)),  # default acquisition gate for adaptive kernel rotation
     }
     
     return defaults
@@ -392,9 +393,10 @@ class BOBE:
                 f"Provided gp has ndim={self.gp.ndim}, expected {self.ndim} to match likelihood."
             )
 
-        # Bind likelihood metadata (parameter names and any deferred physical-space kernel transform)
-        self.gp.bind_likelihood(
-            self.loglikelihood.param_bounds,
+        # Initialize surrogate with likelihood dimensionality, bounds, and parameter names
+        self.gp.initialize(
+            ndim=self.ndim,
+            param_bounds=self.loglikelihood.param_bounds,
             param_names=self.loglikelihood.param_list,
         )
 
@@ -593,6 +595,34 @@ class BOBE:
     # RUN HELPER METHODS
     # ============================================================================
 
+    def _refit_gp_hyperparameters(self, force=False, reason=None):
+        """Conditionally refit GP hyperparameters using the shared size-based policy."""
+        gp_size = self.gp.train_x.shape[0]
+        if gp_size < 200:
+            # For small training sets, refit more frequently
+            refit_threshold = min(4, self.fit_n_points)
+            maxiter = 1000
+            n_restarts = 8
+        elif gp_size < 800:
+            # For moderate size training sets
+            refit_threshold = self.fit_n_points
+            n_restarts = 4
+            maxiter = 500
+        else:
+            # For large training sets, refit less frequently
+            refit_threshold = max(50, self.fit_n_points)
+            n_restarts = 4
+            maxiter = 200
+
+        if not force and self.n_points_since_last_fit < refit_threshold:
+            return False
+
+        suffix = f" ({reason})" if reason else ""
+        log.info(f"Refitting GP hyperparameters with {gp_size} training points{suffix}")
+        self.pool.gp_fit(self.gp, n_restarts=n_restarts, maxiters=maxiter, rng=self.np_rng, use_pool=True)
+        self.n_points_since_last_fit = 0
+        return True
+
     def update_gp(self, new_pts_u, new_vals, step = 0, verbose=True):
         """
         Update the GP with new points and values, and track hyperparameters.
@@ -617,31 +647,7 @@ class BOBE:
         actual_points_added = gp_size_after - gp_size_before
         self.n_points_since_last_fit += actual_points_added
         
-        # Determine refit parameters based on training set size and points added
-        if gp_size_after < 200:
-            # For small training sets, refit more frequently
-            refit_threshold = min(4, self.fit_n_points)
-            maxiter = 1000
-            n_restarts = 8
-        elif 200 < gp_size_after < 800:
-            # For moderate size training sets
-            refit_threshold = self.fit_n_points
-            n_restarts = 4
-            maxiter = 500
-        else:
-            # For large training sets, refit less frequently
-            refit_threshold = max(50, self.fit_n_points)
-            n_restarts = 4
-            maxiter = 200
-        
-        refit = (self.n_points_since_last_fit >= refit_threshold)
-        
-        # Use pool for parallel GP fitting if refitting
-        if refit:
-            log.info(f"Refitting GP hyperparameters with {self.gp.train_x.shape[0]} training points ")
-            self.pool.gp_fit(self.gp, n_restarts=n_restarts, maxiters=maxiter, rng=self.np_rng, use_pool=True)
-            # Reset counter after successful refit
-            self.n_points_since_last_fit = 0
+        self._refit_gp_hyperparameters()
         
         self.results_manager.end_timing('GP Training')
 
@@ -783,6 +789,22 @@ class BOBE:
                 'classifier_used': False,
                 'classifier_type': None,
                 'classifier_training_set_size': 0
+            })
+
+        kernel_rotation = getattr(self.gp, 'kernel_rotation', None)
+        if kernel_rotation is not None:
+            gp_info.update({
+                'kernel_rotation_update_count': kernel_rotation.update_count,
+                'last_kernel_rotation_iteration': kernel_rotation.last_update_ii,
+                'last_kernel_rotation_acq_val': kernel_rotation.last_update_acq_val,
+                'last_kernel_rotation_kl': kernel_rotation.last_update_kl,
+            })
+        else:
+            gp_info.update({
+                'kernel_rotation_update_count': 0,
+                'last_kernel_rotation_iteration': None,
+                'last_kernel_rotation_acq_val': None,
+                'last_kernel_rotation_kl': None,
             })
 
         # Add evidence info if available
@@ -1042,7 +1064,17 @@ class BOBE:
         mc_points_size = mc_points_size if mc_points_size is not None else dim_defaults['mc_points_size']
         num_chains = num_chains if num_chains is not None else dim_defaults['num_chains']
         logz_threshold = logz_threshold if logz_threshold is not None else dim_defaults['logz_threshold']
-        
+
+        kernel_rotation = getattr(self.gp, 'kernel_rotation', None)
+        if kernel_rotation is not None and kernel_rotation.adaptive:
+            if mc_points_method.lower() == 'uniform':
+                raise ValueError(
+                    "Adaptive kernel rotation requires posterior MC samples; "
+                    "mc_points_method='uniform' is not supported"
+                )
+            if kernel_rotation.acq_threshold is None:
+                kernel_rotation.acq_threshold = dim_defaults['transform_acq_threshold']
+
         # Store convergence parameters
         self.min_evals = min_evals
         self.max_evals = max_evals
@@ -1058,6 +1090,23 @@ class BOBE:
             acq_info = "ei_goal = {:.4e}".format(ei_goal)
         log.info(f"convergence_n_iters = {convergence_n_iters}, acq = {acq}, {acq_info}")
         log.info(f"fit_n_points = {fit_n_points}, batch_size = {batch_size}, ns_n_points = {ns_n_points}")
+
+        if kernel_rotation is not None and kernel_rotation.adaptive:
+            log.info(
+                "Adaptive kernel rotation enabled: "
+                f"dims={np.asarray(kernel_rotation.update_dims).tolist()}, "
+                f"acq_threshold={kernel_rotation.acq_threshold}, "
+                f"update_step={kernel_rotation.update_step}, "
+                f"max_updates={kernel_rotation.max_updates}, "
+                f"kl_threshold={kernel_rotation.kl_threshold}"
+            )
+            if kernel_rotation.update_count > 0:
+                log.info(
+                    "Resuming kernel rotation state: "
+                    f"count={kernel_rotation.update_count}, "
+                    f"last_ii={kernel_rotation.last_update_ii}, "
+                    f"last_acq_val={kernel_rotation.last_update_acq_val}"
+                )
         
         # Initialize result containers
         self.samples_dict = {}
@@ -1350,6 +1399,27 @@ class BOBE:
             # Update results manager with iteration info, also save results and gp if save_step
             if ii % self.save_step == 0:
                 self.results_manager.save_intermediate(gp=self.gp)
+
+            # Adaptive kernel rotations alter only the GP metric. Training,
+            # classifier, acquisition, and MC coordinates remain in the same
+            # unit cube, so no points are remapped or filtered.
+            if not self.converged and getattr(self.gp, 'has_adaptive_kernel_rotation', False):
+                did_update = self.gp.try_update_kernel_rotation(
+                    mc_samples=self.mc_samples,
+                    acq_val=float(np.mean(acq_vals)),
+                    step=ii,
+                    current_evals=current_evals,
+                    min_evals=self.min_evals,
+                )
+                if did_update:
+                    self.results_manager.start_timing('GP Training')
+                    self._refit_gp_hyperparameters(
+                        force=True,
+                        reason="after adaptive kernel rotation",
+                    )
+                    self.results_manager.end_timing('GP Training')
+                    if self.save:
+                        self.results_manager.save_intermediate(gp=self.gp)
 
             if self.converged:
                 break

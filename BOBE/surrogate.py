@@ -45,11 +45,11 @@ class Surrogate(ABC):
         super().__init_subclass__(**kwargs)
         SURROGATE_REGISTRY[cls.__name__] = cls
 
-    def bind_likelihood(self, param_bounds, param_names=None) -> None:
+    def initialize(self, ndim=None, param_bounds=None, param_names=None) -> None:
         """
-        Optional hook called by ``BOBE`` to pass likelihood metadata
-        (parameter bounds and names) to the surrogate before initial data
-        are added. Default is a no-op.
+        Optional deferred initialization hook called by ``BOBE`` with problem
+        dimensionality, parameter bounds, and parameter names before initial
+        data are added. Default is a no-op.
         """
         return None
 

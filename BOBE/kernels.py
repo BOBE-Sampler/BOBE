@@ -245,27 +245,26 @@ class Kernel(ABC):
                 f"Expected rotation shape {(expected_ndim, expected_ndim)}, got {transform.rotation.shape}."
             )
 
-    def bind_space(self, param_bounds, param_names=None):
-        """
-        Bind any deferred physical-space kernel transform using likelihood bounds
-        and parameter names. No-op if no transform requires binding.
-        """
-        if self.input_transform is not None and hasattr(self.input_transform, "bind_space"):
-            self.input_transform.bind_space(param_bounds, param_names=param_names)
-            if self.ndim is not None:
-                self._validate_input_transform(self.ndim)
-
-    def initialize(self, ndim: int):
+    def initialize(self, ndim: int = None, param_bounds=None, param_names=None):
         """
         Complete dimension-dependent initialization (default lengthscales,
-        priors, and optimization bounds). Safe to call repeatedly with the
-        same ``ndim``.
+        priors, optimization bounds, and any deferred input transform).
+        Safe to call repeatedly with the same ``ndim``.
         """
+        if ndim is None and param_bounds is not None:
+            ndim = int(np.asarray(param_bounds).shape[1])
+        if ndim is None:
+            raise ValueError("Provide ndim or param_bounds to initialize Kernel.")
         ndim = int(ndim)
+
         if self._initialized:
             if self.ndim != ndim:
                 raise ValueError(
                     f"Kernel was initialized for ndim={self.ndim}, cannot use with ndim={ndim}."
+                )
+            if self.input_transform is not None and hasattr(self.input_transform, "initialize"):
+                self.input_transform.initialize(
+                    ndim=ndim, param_bounds=param_bounds, param_names=param_names
                 )
             self._validate_input_transform(ndim)
             return
@@ -280,6 +279,10 @@ class Kernel(ABC):
         else:
             self.lengthscales = jnp.ones(ndim, dtype=float)
 
+        if self.input_transform is not None and hasattr(self.input_transform, "initialize"):
+            self.input_transform.initialize(
+                ndim=ndim, param_bounds=param_bounds, param_names=param_names
+            )
         self._validate_input_transform(ndim)
         self._setup_kernel_variance_prior(self._kernel_variance_prior_arg)
         self._setup_noise_prior(self._noise_prior_arg)
@@ -291,6 +294,8 @@ class Kernel(ABC):
         """Set a transform applied only while evaluating the kernel."""
         self.input_transform = transform
         if self.ndim is not None:
+            if transform is not None and hasattr(transform, "initialize"):
+                transform.initialize(ndim=self.ndim)
             self._validate_input_transform(self.ndim)
 
     def pre_transform(self, x):

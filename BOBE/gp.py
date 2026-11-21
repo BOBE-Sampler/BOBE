@@ -14,6 +14,7 @@ from .optim import optimize_optax, optimize_scipy
 from .utils.seed import get_new_jax_key, get_numpy_rng
 from .kernels import Kernel
 from .surrogate import Surrogate
+from .transforms import PrincipalAxesTransform
 
 
 safe_noise_floor = 1e-12
@@ -106,43 +107,106 @@ class GP(Surrogate):
             self.y_mean = 0.0
             self.y_std = 1.0
 
-    def bind_likelihood(self, param_bounds, param_names=None) -> None:
+    def initialize(self, ndim=None, param_bounds=None, param_names=None):
         """
-        Attach likelihood parameter names (if unset) and bind any deferred
-        physical-space kernel transform to ``param_bounds``.
-        """
-        if self._param_names_arg is None and param_names is not None:
-            self._param_names_arg = list(param_names)
-            if hasattr(self, "param_names"):
-                self.param_names = list(param_names)
-
-        self.kernel.bind_space(param_bounds, param_names=param_names)
-        if self.ndim is not None and self.train_x is not None and self.train_x.shape[0] > 0:
-            self.recompute_cholesky()
-
-    def initialize(self, ndim=None):
-        """
-        Complete all ndim-dependent initialisation.
+        Complete deferred initialisation (dimensionality, parameter names,
+        kernel, and any deferred kernel input transform).
 
         Called immediately from ``__init__`` when training data are provided,
-        or from ``update()`` on first data arrival when constructed with
-        ``train_x=None``.
+        from ``BOBE`` with likelihood bounds/names, or from ``update()`` on
+        first data arrival when constructed with ``train_x=None``.
         """
-        if ndim is not None:
-            self.ndim = ndim
-            self.train_x = jnp.empty((0, ndim))
+        if ndim is None and param_bounds is not None:
+            ndim = int(np.asarray(param_bounds).shape[1])
+
+        if self.ndim is None:
+            if ndim is None:
+                raise ValueError("Provide ndim or param_bounds to initialize GP.")
+            self.ndim = int(ndim)
+            self.train_x = jnp.empty((0, self.ndim))
             self.train_y = jnp.empty((0, 1))
             self.y_mean = 0.0
             self.y_std = 1.0
+        elif ndim is not None and int(ndim) != self.ndim:
+            raise ValueError(
+                f"GP was initialized for ndim={self.ndim}, cannot use with ndim={ndim}."
+            )
+
+        if self._param_names_arg is None and param_names is not None:
+            self._param_names_arg = list(param_names)
 
         self.param_names = (
-            self._param_names_arg
+            list(self._param_names_arg)
             if self._param_names_arg is not None
             else ['x_' + str(i) for i in range(self.ndim)]
         )
 
-        self.kernel.initialize(self.ndim)
+        self.kernel.initialize(
+            self.ndim, param_bounds=param_bounds, param_names=param_names
+        )
         self.recompute_cholesky()
+
+    @property
+    def kernel_rotation(self):
+        transform = getattr(self.kernel, "input_transform", None)
+        if isinstance(transform, PrincipalAxesTransform):
+            return transform
+        return None
+
+    @property
+    def has_adaptive_kernel_rotation(self):
+        return self.kernel_rotation is not None and self.kernel_rotation.adaptive
+
+    def try_update_kernel_rotation(
+        self,
+        mc_samples,
+        acq_val,
+        step,
+        acq_threshold=None,
+        current_evals=None,
+        min_evals=None,
+    ):
+        """Update the kernel rotation from posterior samples, if gated in."""
+        transform = self.kernel_rotation
+        if transform is None:
+            return False
+        if min_evals is not None:
+            if current_evals is None:
+                raise ValueError(
+                    "current_evals is required when min_evals is provided"
+                )
+            if current_evals < min_evals:
+                log.debug(
+                    "Skipping adaptive kernel rotation before min_evals: "
+                    f"{current_evals} < {min_evals}"
+                )
+                return False
+        # Axes are learned in the coordinates the transform receives, i.e.
+        # after any kernel pre_transform.
+        x = np.asarray(mc_samples["x"], dtype=float)
+        mc_samples = {**mc_samples, "x": np.asarray(self.kernel.pre_transform(x))}
+        try:
+            did_update = transform.try_update(
+                mc_samples=mc_samples,
+                acq_val=acq_val,
+                step=step,
+                acq_threshold=acq_threshold,
+            )
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            log.warning(f"[Kernel rotation update] {exc}; skipping.")
+            return False
+        if did_update:
+            self.recompute_cholesky()
+            kl_text = (
+                "first posterior baseline"
+                if transform.last_update_kl is None
+                else f"symmetric KL={transform.last_update_kl:.4f}"
+            )
+            log.info(
+                f"[Kernel rotation update] accepted at iteration {step}: "
+                f"count={transform.update_count}, {kl_text}"
+            )
+        return did_update
 
     def _setup_training_data(self, train_x, train_y):
         """

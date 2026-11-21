@@ -116,6 +116,70 @@ def kl_divergence_gaussian(mu1, Cov1, mu2, Cov2):
     }
 
 
+def principal_axes(covariance):
+    """Return covariance eigenvalues/eigenvectors in descending order."""
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    order = np.argsort(eigenvalues)[::-1]
+    return eigenvalues[order], eigenvectors[:, order]
+
+
+def regularize_covariance(
+    covariance, ndim=None, regularize_eps=0.0, name="Covariance"
+):
+    """Symmetrize, optionally regularize, and validate a covariance matrix."""
+    covariance = np.asarray(covariance, dtype=np.float64)
+    if ndim is None:
+        if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+            raise ValueError(f"{name} must be square")
+        ndim = covariance.shape[0]
+    if covariance.shape != (ndim, ndim):
+        raise ValueError(
+            f"{name} has shape {covariance.shape}; expected {(ndim, ndim)}"
+        )
+    if not np.all(np.isfinite(covariance)):
+        raise ValueError(f"{name} must be finite")
+    covariance = 0.5 * (covariance + covariance.T)
+    if regularize_eps > 0.0:
+        covariance = covariance + regularize_eps * np.eye(ndim)
+    min_eigenvalue = np.min(np.linalg.eigvalsh(covariance))
+    if min_eigenvalue <= 0.0:
+        raise ValueError(
+            f"{name} is not positive definite "
+            f"(minimum eigenvalue {min_eigenvalue:.3e})"
+        )
+    return covariance
+
+
+def weighted_mean_and_covariance(samples, weights=None):
+    """Compute a mean and population-weighted or sample covariance."""
+    samples = np.asarray(samples, dtype=np.float64)
+    if samples.ndim != 2:
+        raise ValueError("samples must be a two-dimensional array")
+    if len(samples) < 2:
+        raise ValueError("at least two samples are required")
+
+    if weights is None:
+        mean = np.mean(samples, axis=0)
+        covariance = np.cov(samples, rowvar=False)
+    else:
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != (len(samples),):
+            raise ValueError("weights do not match the samples")
+        if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
+            raise ValueError("weights must be finite and non-negative")
+        total = np.sum(weights)
+        if total <= 0.0:
+            raise ValueError("weights must have positive total weight")
+        weights = weights / total
+        mean = np.average(samples, axis=0, weights=weights)
+        delta = samples - mean
+        covariance = (delta * weights[:, None]).T @ delta
+
+    covariance = np.atleast_2d(covariance)
+    covariance = 0.5 * (covariance + covariance.T)
+    return mean, covariance
+
+
 def resolve_parameter_dimensions(dims, param_names, ndim, name="dimensions"):
     """Resolve parameter names or integer indices to validated indices."""
     if dims is None:

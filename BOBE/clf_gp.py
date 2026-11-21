@@ -154,18 +154,23 @@ class ClassifierGP(GP, ClassifierMixin):
         else:
             log.debug(f"Not enough data ({self.clf_data_size}) to use classifier (need {self.clf_use_size} points), or classifier type not set.")
 
-    def initialize(self, ndim=None):
+    def initialize(self, ndim=None, param_bounds=None, param_names=None):
         """
-        Complete all ndim-dependent initialisation for the GP and classifier.
+        Complete deferred initialisation for the GP, kernel transform, and classifier.
 
         Called immediately from ``__init__`` when training data are provided,
-        or from ``update()`` on first data arrival when constructed with
-        ``train_x=None``.
+        from ``BOBE`` with likelihood bounds/names, or from ``update()`` on
+        first data arrival when constructed with ``train_x=None``.
         """
-        if ndim is not None:
-            self.train_x_clf = jnp.empty((0, ndim))
+        resolved_ndim = ndim
+        if resolved_ndim is None and param_bounds is not None:
+            resolved_ndim = int(np.asarray(param_bounds).shape[1])
+        if self.train_x_clf is None and resolved_ndim is not None:
+            self.train_x_clf = jnp.empty((0, int(resolved_ndim)))
             self.train_y_clf = jnp.empty((0, 1))
-        super().initialize(ndim=ndim)
+        super().initialize(
+            ndim=resolved_ndim, param_bounds=param_bounds, param_names=param_names
+        )
 
     def train_classifier(self):
         """Public method to train/retrain the classifier."""
