@@ -121,6 +121,5 @@ def ensure_reproducibility(seed: int | None = None) -> int:
         The seed that was used.
     """
     used_seed = set_global_seed(seed)
-    jax.config.update("jax_enable_x64", True)
     log.info(f"Reproducibility ensured with seed {used_seed}")
     return used_seed

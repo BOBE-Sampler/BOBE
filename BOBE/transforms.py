@@ -3,23 +3,17 @@ from typing import Sequence
 
 import jax.numpy as jnp
 
-from .utils.core import renormalise_log_weights
+from .utils.core import renormalise_log_weights, resolve_parameter_dimensions
 
 
-def prepare_rotation_inputs(covariance=None, samples=None, param_bounds=None, rotation_dims=None, rotation_space="physical"):
-
-    if rotation_space not in ("physical", "unit"):
-        raise ValueError(
-            "rotation_space must be either 'physical' or 'unit'"
-        )
-
-    if (rotation_space == "unit" or sum(x is not None for x in (covariance, samples)) != 1):
+def prepare_rotation_inputs(covariance=None, samples=None, param_bounds=None, rotation_dims=None):
+    """Scale physical-space covariance or samples into unit-hypercube coordinates."""
+    if sum(x is not None for x in (covariance, samples)) != 1:
         return covariance, samples
-
 
     source = jnp.asarray(covariance if covariance is not None else samples)
 
-    if (source.ndim != 2 or covariance is not None and source.shape[0] != source.shape[1]):
+    if source.ndim != 2 or (covariance is not None and source.shape[0] != source.shape[1]):
         return covariance, samples
 
     bounds = jnp.asarray(param_bounds)
@@ -75,30 +69,41 @@ class PrincipalAxesTransform(InputTransform):
         weights: jnp.ndarray = None,
         log_weights: jnp.ndarray = None,
         rotation_dims: Sequence[int] = None,
+        param_bounds: jnp.ndarray = None,
+        param_names: Sequence[str] = None,
     ):
         """
         Initialise a static principal-axes rotation of the kernel metric.
 
-        Exactly one of covariance or samples must be provided. All inputs are
-        assumed to be expressed in the same unit-hypercube coordinates used
-        internally by BOBE.
+        Exactly one of ``covariance`` or ``samples`` must be provided, always
+        in **physical** parameter coordinates. Internally the inputs are scaled
+        to unit-hypercube coordinates using ``param_bounds`` before computing
+        the orthogonal rotation matrix.
 
         Parameters
         ----------
         covariance : jnp.ndarray, optional
-            Covariance matrix used to define the static rotation.
+            Covariance matrix in physical coordinates used to define the
+            static rotation.
         samples : jnp.ndarray, optional
-            Samples or chain points used to estimate the covariance matrix.
-            This may be, for example, weighted nested-sampling samples or an
-            MCMC chain.
+            Samples or chain points in physical coordinates used to estimate
+            the covariance matrix (e.g. weighted nested-sampling samples or an
+            MCMC chain).
         weights : jnp.ndarray, optional
-            Weights associated with the supplied samples or chain.
+            Weights associated with the supplied samples.
         log_weights : jnp.ndarray, optional
-            Log weights associated with the supplied samples, such as
-            nested-sampling log weights.
-        rotation_dims : sequence of int, optional
-            Dimensions of the kernel metric to rotate. If None, all
-            dimensions are rotated.
+            Log weights associated with the supplied samples.
+        rotation_dims : sequence of int or str, optional
+            Dimensions of the kernel metric to rotate. If ``None``, all
+            dimensions are rotated. String parameter names require
+            ``param_names`` (either here or later via ``bind_space``).
+        param_bounds : jnp.ndarray, optional
+            Parameter bounds, shape ``(2, D)``, used to convert the physical
+            covariance or samples into unit-cube coordinates. If ``None``,
+            finalisation is deferred until ``bind_space(param_bounds)`` is
+            called (e.g. automatically by ``BOBE``).
+        param_names : sequence of str, optional
+            Parameter names used to resolve string entries in ``rotation_dims``.
         """
         sources = (
             covariance is not None,
@@ -122,11 +127,35 @@ class PrincipalAxesTransform(InputTransform):
                 "Weights and log_weights can only be used with samples"
             )
 
-        self.rotation_dims = self._setup_rotation_dims(rotation_dims)
+        self._raw_rotation_dims = None
+        self._pending_inputs = None
 
+        if rotation_dims is not None and any(isinstance(d, str) for d in rotation_dims):
+            if param_names is not None:
+                resolved = resolve_parameter_dimensions(
+                    rotation_dims, param_names, len(param_names), "rotation_dims"
+                )
+                self.rotation_dims = self._setup_rotation_dims(resolved)
+            else:
+                self._raw_rotation_dims = list(rotation_dims)
+                self.rotation_dims = None
+        else:
+            self.rotation_dims = self._setup_rotation_dims(rotation_dims)
+
+        self._pending_inputs = {
+            "covariance": covariance,
+            "samples": samples,
+            "weights": weights,
+            "log_weights": log_weights,
+        }
+        self.rotation = None
+        if param_bounds is not None:
+            self.bind_space(param_bounds, param_names=param_names)
+
+    def _finalize(self, covariance=None, samples=None, weights=None, log_weights=None):
+        """Compute the orthogonal rotation matrix from unit-space inputs."""
         if covariance is not None:
             covariance = self._select_matrix(covariance)
-
         else:
             samples = self._select_samples(samples)
             covariance = self._covariance_from_samples(
@@ -134,8 +163,44 @@ class PrincipalAxesTransform(InputTransform):
                 weights=weights,
                 log_weights=log_weights,
             )
-
         self.rotation = self._rotation_from_covariance(covariance)
+
+    def bind_space(self, param_bounds, param_names=None):
+        """
+        Convert physical-space inputs to unit-cube coordinates using
+        ``param_bounds`` (and resolve named ``rotation_dims`` via
+        ``param_names``) and compute the orthogonal rotation matrix.
+
+        No-op if already finalised.
+        """
+        if self._pending_inputs is None:
+            return
+
+        param_bounds = jnp.asarray(param_bounds)
+        ndim = param_bounds.shape[1]
+
+        if self._raw_rotation_dims is not None:
+            resolved = resolve_parameter_dimensions(
+                self._raw_rotation_dims, param_names, ndim, "rotation_dims"
+            )
+            self.rotation_dims = self._setup_rotation_dims(resolved)
+            self._raw_rotation_dims = None
+
+        inputs = self._pending_inputs
+        covariance, samples = prepare_rotation_inputs(
+            covariance=inputs["covariance"],
+            samples=inputs["samples"],
+            param_bounds=param_bounds,
+            rotation_dims=self.rotation_dims,
+        )
+
+        self._finalize(
+            covariance=covariance,
+            samples=samples,
+            weights=inputs["weights"],
+            log_weights=inputs["log_weights"],
+        )
+        self._pending_inputs = None
 
     @staticmethod
     def _setup_rotation_dims(rotation_dims):
@@ -262,6 +327,10 @@ class PrincipalAxesTransform(InputTransform):
         return 0.5 * (covariance + covariance.T)
 
     def forward(self, x: jnp.ndarray) -> jnp.ndarray:
+        if self.rotation is None:
+            raise RuntimeError(
+                "PrincipalAxesTransform is not bound yet; call bind_space(param_bounds) first."
+            )
         if self.rotation_dims is None:
             return x @ self.rotation
 
@@ -270,6 +339,10 @@ class PrincipalAxesTransform(InputTransform):
         return x.at[..., self.rotation_dims].set(rotated)
 
     def inverse(self, x: jnp.ndarray) -> jnp.ndarray:
+        if self.rotation is None:
+            raise RuntimeError(
+                "PrincipalAxesTransform is not bound yet; call bind_space(param_bounds) first."
+            )
         if self.rotation_dims is None:
             return x @ self.rotation.T
 
@@ -278,6 +351,10 @@ class PrincipalAxesTransform(InputTransform):
         return x.at[..., self.rotation_dims].set(unrotated)
 
     def state_dict(self):
+        if self.rotation is None:
+            raise RuntimeError(
+                "Cannot serialize an unbound PrincipalAxesTransform; call bind_space(param_bounds) first."
+            )
         return {
             "type": "PrincipalAxesTransform",
             "rotation": self.rotation,
@@ -287,6 +364,8 @@ class PrincipalAxesTransform(InputTransform):
     @classmethod
     def from_state_dict(cls, state):
         transform = cls.__new__(cls)
+        transform._pending_inputs = None
+        transform._raw_rotation_dims = None
         transform.rotation = jnp.asarray(state["rotation"])
 
         rotation_dims = state.get("rotation_dims")

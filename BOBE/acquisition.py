@@ -5,15 +5,67 @@ from jax import lax,jit
 import numpy as np
 from scipy.stats import qmc
 from jax.scipy.stats import norm
-from jax import config
-import tensorflow_probability.substrates.jax as tfp
 from .optim import optimize_optax, optimize_optax_vmap, optimize_scipy
 from .utils.log import get_logger
 from .utils.seed import get_numpy_rng
 from .samplers import nested_sampling_Dy, sample_GP_NUTS
 from .gp import GP
-config.update("jax_enable_x64", True)
 log = get_logger("acq")
+
+# ---------------------------------------------------------------------------
+# Optional TFP import — not compatible with all JAX versions.
+# If unavailable we fall back to pure-JAX implementations of erfcx / log1mexp.
+# ---------------------------------------------------------------------------
+try:
+    import tensorflow_probability.substrates.jax as tfp
+    _TFP_AVAILABLE = True
+except Exception:
+    _TFP_AVAILABLE = False
+    log.warning(
+        "tensorflow_probability not available (may be incompatible with current JAX version). "
+        "LogEI will use a pure-JAX fallback for erfcx / log1mexp."
+    )
+
+
+def _erfcx_jax(x):
+    """
+    Pure-JAX erfcx(x) = exp(x^2) * erfc(x), stable for large positive x.
+
+    TODO: add ref
+    """
+    x_small = jnp.where(x <= 25.0, x, 0.0)
+    direct = jnp.exp(x_small ** 2) * jax.scipy.special.erfc(x_small)
+
+    x_large = jnp.where(x > 25.0, x, 25.0)
+    inv_2x2 = 0.5 / (x_large ** 2)
+    asymp = (
+        1.0
+        + inv_2x2 * (
+            -1.0
+            + inv_2x2 * (
+                3.0
+                + inv_2x2 * (
+                    -15.0
+                    + inv_2x2 * (
+                        105.0
+                        + inv_2x2 * (-945.0 + inv_2x2 * 10395.0)
+                    )
+                )
+            )
+        )
+    ) / (jnp.sqrt(jnp.pi) * x_large)
+    return jnp.where(x <= 25.0, direct, asymp)
+
+
+def _log1mexp_jax(x):
+    """
+    Pure-JAX log(1 - exp(x)) for x < 0, numerically stable.
+    """
+    return jnp.where(
+        x > -jnp.log(2.0),
+        jnp.log(-jnp.expm1(x)),
+        jnp.log1p(-jnp.exp(x)),
+    )
 
 #------------------Helper functions-------------------------
 # These are jax versions of the BoTorch functions. 
@@ -38,7 +90,10 @@ def _log_abs_u_Phi_div_phi(u):
     neg_inv_sqrt2 = -1.0 / jnp.sqrt(2.0)
     log_sqrt_pi_div_2 = 0.5 * jnp.log(jnp.pi / 2.0)
 
-    erfcx_val = tfp.math.erfcx(neg_inv_sqrt2 * u)
+    if _TFP_AVAILABLE:
+        erfcx_val = tfp.math.erfcx(neg_inv_sqrt2 * u)
+    else:
+        erfcx_val = _erfcx_jax(neg_inv_sqrt2 * u)
     return jnp.log(jnp.abs(u) * erfcx_val) + log_sqrt_pi_div_2
 
 def _log_ei_helper(u):
@@ -65,9 +120,11 @@ def _log_ei_helper(u):
     w = _log_abs_u_Phi_div_phi(u_eps)
     log_phi_u = _log_phi(u)
 
+    log1mexp_fn = tfp.math.log1mexp if _TFP_AVAILABLE else _log1mexp_jax
+
     second_term = jnp.where(
         u > neg_inv_sqrt_eps,
-        tfp.math.log1mexp(w),
+        log1mexp_fn(w),
         -2.0 * jnp.log(jnp.abs(u_lower))
     )
     log_ei_lower = log_phi_u + second_term
@@ -171,17 +228,12 @@ class AcquisitionFunction:
         acq_vals.append(acq_val_next)
 
         if n_batch > 1:
-            # Create dummy GP without classifier functionality, for now we do not use batching for EI/LogEI
-            state = gp.state_dict()
-            dummy_gp = GP.from_state_dict(state)
-            # dummy_gp = GP(train_x=gp.train_x, 
-            #              train_y=gp.train_y*gp.y_std + gp.y_mean,
-            #              noise=gp.noise,
-            #              kernel=gp.kernel_name,
-            #              lengthscales=gp.lengthscales,
-            #              kernel_variance=gp.kernel_variance,)
-                        
-            dummy_gp.update(x_next, dummy_gp.predict_mean_single(x_next))
+            # Reconstruct explicitly as a base GP so fantasy observations do
+            # not use classifier gating, while retaining the complete fitted
+            # GP state (including any kernel input-space transform).
+            dummy_gp = GP.from_state_dict(gp.state_dict())
+
+            dummy_gp.update(x_next, dummy_gp.predict_mean(x_next))
             for i in range(1,n_batch):
                 x_next, acq_val_next = self.get_next_point(dummy_gp, acq_kwargs=acq_kwargs,
                                                         maxiter=maxiter,
@@ -192,7 +244,7 @@ class AcquisitionFunction:
                 x_batch.append(x_next)
                 acq_vals.append(acq_val_next)
 
-                mu = dummy_gp.predict_mean_single(x_next)
+                mu = dummy_gp.predict_mean(x_next)
                 dummy_gp.update(x_next, mu)
 
         return np.array(x_batch), np.array(acq_vals)
@@ -245,7 +297,7 @@ class EI(AcquisitionFunction):
         float
             Negative expected improvement (for minimization).
         """
-        mu, var = gp.predict_single(x)
+        mu, var = gp.predict(x, standardized=True)
         var = jnp.clip(var, a_min=1e-20)  # prevent zero variance
         sigma = jnp.sqrt(var)
 
@@ -322,7 +374,7 @@ class LogEI(EI):
         Log Expected Improvement in pure JAX.
         Returns *positive* log-EI, so you can maximize directly.
         """
-        mu, var = gp.predict_single(x)
+        mu, var = gp.predict(x, standardized=True)
         var = jnp.clip(var, a_min=1e-18)  # prevent zero variance
         sigma = jnp.sqrt(var)
 
@@ -387,11 +439,11 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
         mc_samples = acq_kwargs.get('mc_samples')
         mc_points_size = acq_kwargs.get('mc_points_size', 128)
         mc_points = get_mc_points(mc_samples, mc_points_size=mc_points_size, rng=rng)
-        k_train_mc = gp.kernel.covariance(gp.train_x, mc_points, include_noise=False)
+        cache = gp.precompute_fantasy_cache(mc_points)
 
         @jax.jit
         def mapped_fn(x):
-            return self.fun(x, gp, mc_points=mc_points, k_train_mc=k_train_mc)
+            return self.fun(x, gp, mc_points=mc_points, cache=cache)
 
         acq_vals = lax.map(mapped_fn, mc_points)
         acq_val_min = jnp.min(acq_vals)
@@ -404,7 +456,7 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
         else:
             return self.acq_optimize(fun=self.fun,
                                   fun_args=(gp,),
-                                  fun_kwargs={'mc_points': mc_points, 'k_train_mc': k_train_mc},
+                                  fun_kwargs={'mc_points': mc_points, 'cache': cache},
                                   num_params=gp.ndim,
                                   x0=x0_acq,
                                   bounds = [0,1],
@@ -437,8 +489,8 @@ class WIPV(WeightedIntegratedPosteriorBase):
 
     name: str = "WIPV"
 
-    def fun(self, x, gp,  mc_points=None, k_train_mc = None):
-        var = gp.fantasy_var(new_x=x, mc_points=mc_points,k_train_mc=k_train_mc)
+    def fun(self, x, gp, mc_points=None, cache=None):
+        var = gp.fantasy_var(new_x=x, mc_points=mc_points, cache=cache)
         return jnp.mean(var)
 
 
@@ -462,8 +514,8 @@ class WIPStd(WeightedIntegratedPosteriorBase):
 
     name: str = "WIPStd"
 
-    def fun(self, x, gp,  mc_points=None, k_train_mc = None):
-        std = jnp.sqrt(gp.fantasy_var(new_x=x, mc_points=mc_points,k_train_mc=k_train_mc))
+    def fun(self, x, gp, mc_points=None, cache=None):
+        std = jnp.sqrt(gp.fantasy_var(new_x=x, mc_points=mc_points, cache=cache))
         return jnp.mean(std)
 
 
@@ -481,11 +533,36 @@ def get_mc_samples(gp: GP,warmup_steps=512, num_samples=1024, thinning=4,method=
         mc_samples['x'] = points
     else:
         raise ValueError(f"Unknown method {method} for sampling GP")
+
+    # Filter out NaN samples early
+    samples = mc_samples['x']
+    if np.any(np.isnan(samples)):
+        valid_mask = ~np.any(np.isnan(samples), axis=1)
+        n_bad = np.sum(~valid_mask)
+        log.warning(f"Filtered {n_bad} NaN samples from MC chain ({n_bad/len(samples)*100:.1f}%)")
+        mc_samples['x'] = samples[valid_mask]
+        for key in ('weights', 'logp', 'logl'):
+            if key in mc_samples and len(mc_samples[key]) == len(valid_mask):
+                mc_samples[key] = np.asarray(mc_samples[key])[valid_mask]
+
     return mc_samples
 
 
 def get_mc_points(mc_samples, mc_points_size=128, rng=None):
-    mc_size = max(mc_samples['x'].shape[0], mc_points_size)
-    rng = rng if rng is not None else get_numpy_rng()   
-    idxs = rng.choice(mc_size, size=mc_points_size, replace=False)
-    return mc_samples['x'][idxs]
+    """Select a subset of MC samples for acquisition function evaluation."""
+    samples = mc_samples['x']
+    n_available = samples.shape[0]
+
+    # Check for NaN in samples
+    if np.any(np.isnan(samples)):
+        log.warning(f"NaN detected in mc_samples! Filtering out {np.sum(np.any(np.isnan(samples), axis=1))} bad samples.")
+        valid_mask = ~np.any(np.isnan(samples), axis=1)
+        samples = samples[valid_mask]
+        n_available = samples.shape[0]
+        if n_available == 0:
+            raise ValueError("All MC samples contain NaN - cannot proceed.")
+
+    rng = rng if rng is not None else get_numpy_rng()
+    n_select = min(n_available, mc_points_size)
+    idxs = rng.choice(n_available, size=n_select, replace=False)
+    return samples[idxs]

@@ -3,7 +3,6 @@
 
 import numpy as np
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from sklearn.svm import SVC
 from typing import Callable, Dict, Any, Union, List, Optional, Tuple

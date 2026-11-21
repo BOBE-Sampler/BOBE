@@ -10,7 +10,7 @@ os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={os.cpu_count
 
 import numpy as np
 import sys
-from BOBE import BOBE
+from BOBE import BOBE, GP, GPwithClassifier, RBFKernel, MaternKernel, PrincipalAxesTransform
 
 
 def rosenbrock_loglike(x):
@@ -112,10 +112,10 @@ def test_bobe_ei_2d():
             param_list=param_list,
             param_bounds=param_bounds,
             likelihood_name="rosenbrock_ei_test",
+            gp=GP(kernel=RBFKernel()),
             n_sobol_init=4,
             save=True,
             save_dir=temp_dir,
-            use_clf=False,
             seed=42,
             verbosity='WARNING'
         )
@@ -198,10 +198,10 @@ def test_bobe_wipstd_2d():
             param_list=param_list,
             param_bounds=param_bounds,
             likelihood_name="himmelblau_test",
+            gp=GP(kernel=RBFKernel()),
             n_sobol_init=4,
             save=True,
             save_dir=temp_dir,
-            use_clf=False,
             seed=123,
             verbosity='WARNING'
         )
@@ -274,16 +274,22 @@ def test_bobe_with_classifier():
     param_bounds = np.array([[-2, 2], [-2, 2]]).T
     param_list = ['x', 'y']
     
+    gp = GPwithClassifier(
+        kernel=RBFKernel(lengthscale_prior="DSLP"),
+        clf_type='svm',
+        clf_use_size=10,
+        clf_threshold=75.0,
+        gp_threshold=150.0,
+        minus_inf=-1e10,
+    )
     bobe = BOBE(
         loglikelihood=rosenbrock_loglike,
         param_list=param_list,
         param_bounds=param_bounds,
         likelihood_name="rosenbrock_clf_test",
+        gp=gp,
         n_sobol_init=4,
         save=False,
-        use_clf=True,
-        clf_type='svm',
-        clf_use_size=10,
         seed=456,
         verbosity='WARNING'
     )
@@ -318,6 +324,111 @@ def test_bobe_with_classifier():
     
     print("\n✓ Classifier test passed")
     return results
+
+
+def test_bobe_custom_gp_kernel_and_physical_rotation(tmp_path):
+    """Test passing a configured GP + Kernel (with physical rotation) and resume into BOBE."""
+    param_bounds = np.array([[-2.0, 2.0], [-2.0, 2.0]]).T
+    param_list = ['x', 'y']
+    phys_cov = np.array([[0.5, 0.2], [0.2, 0.8]])
+
+    transform = PrincipalAxesTransform(
+        covariance=phys_cov,
+        rotation_dims=['x', 'y'],
+    )
+    kernel = MaternKernel(
+        noise=1e-6,
+        lengthscale_prior='DSLP',
+        input_transform=transform,
+    )
+    gp = GP(kernel=kernel, optimizer='scipy')
+
+    import pytest
+    with pytest.raises(ValueError, match="surrogate instance"):
+        BOBE(
+            loglikelihood=rosenbrock_loglike,
+            param_list=param_list,
+            param_bounds=param_bounds,
+            likelihood_name='missing_gp_test',
+            n_sobol_init=4,
+            save=False,
+            verbosity='WARNING',
+        )
+
+    bobe = BOBE(
+        loglikelihood=rosenbrock_loglike,
+        param_list=param_list,
+        param_bounds=param_bounds,
+        likelihood_name='custom_gp_test',
+        gp=gp,
+        n_sobol_init=6,
+        save=True,
+        save_dir=str(tmp_path),
+        seed=7,
+        verbosity='WARNING',
+    )
+    assert bobe.gp is gp
+    assert isinstance(bobe.gp.kernel, MaternKernel)
+    assert bobe.gp.param_names == ['x', 'y']
+    assert bobe.gp.kernel.input_transform.rotation is not None
+    assert bobe.gp.kernel.input_transform.rotation.shape == (2, 2)
+    assert bobe.gp.npoints == 6
+    bobe.pool.close()
+
+    # Resume always restores from resume_file even if a different gp is passed
+    resumed = BOBE(
+        loglikelihood=rosenbrock_loglike,
+        param_list=param_list,
+        param_bounds=param_bounds,
+        likelihood_name='custom_gp_test',
+        gp=GP(kernel=RBFKernel()),
+        resume=True,
+        resume_file=str(tmp_path / 'custom_gp_test'),
+        save=False,
+        save_dir=str(tmp_path),
+        seed=7,
+        verbosity='WARNING',
+    )
+    assert isinstance(resumed.gp.kernel, MaternKernel)
+    assert resumed.gp.kernel.input_transform is not None
+    assert resumed.gp.npoints == 6
+    resumed.pool.close()
+
+    # Pre-populated GP is rejected — custom initial points must go through BOBE
+    pre_x = np.array([[0.2, 0.3], [0.5, 0.5], [0.8, 0.7], [0.3, 0.8]])
+    pre_y = np.array([[-1.0], [-0.2], [-0.5], [-0.8]])
+    pre_gp = GP(train_x=pre_x, train_y=pre_y, kernel=RBFKernel(noise=1e-6))
+    with pytest.raises(ValueError, match="empty surrogate"):
+        BOBE(
+            loglikelihood=rosenbrock_loglike,
+            param_list=param_list,
+            param_bounds=param_bounds,
+            likelihood_name='prepop_test',
+            gp=pre_gp,
+            n_sobol_init=0,
+            save=False,
+            seed=7,
+            verbosity='WARNING',
+        )
+
+    # Custom physical-space initial points passed through BOBE init work with n_sobol_init=0
+    phys_init_x = np.array([[-1.0, 0.0], [0.0, 0.5], [1.0, 1.0], [0.5, -0.5]])
+    phys_init_y = np.array([rosenbrock_loglike(pt) for pt in phys_init_x])
+    bobe_init = BOBE(
+        loglikelihood=rosenbrock_loglike,
+        param_list=param_list,
+        param_bounds=param_bounds,
+        likelihood_name='custom_init_test',
+        gp=GP(kernel=RBFKernel(noise=1e-6)),
+        n_sobol_init=0,
+        init_train_x=phys_init_x,
+        init_train_y=phys_init_y,
+        save=False,
+        seed=7,
+        verbosity='WARNING',
+    )
+    assert bobe_init.gp.npoints == 4
+    bobe_init.pool.close()
 
 
 def run_all_tests():

@@ -14,7 +14,7 @@ import numpy as np
 import sys
 import tempfile
 import shutil
-from BOBE import BOBE
+from BOBE import BOBE, GP, GPwithClassifier, RBFKernel
 
 
 def rosenbrock_loglike(x):
@@ -27,20 +27,29 @@ def _run_bobe(acq, seed, save_dir, *, use_clf=False, clf_type='svm'):
     param_bounds = np.array([[-2, 2], [-2, 2]]).T
     param_list = ['x', 'y']
 
+    if use_clf:
+        gp = GPwithClassifier(
+            kernel=RBFKernel(lengthscale_prior="DSLP"),
+            clf_type=clf_type,
+            clf_use_size=10,
+            clf_threshold=75.0,
+            gp_threshold=150.0,
+            minus_inf=-1e10,
+        )
+    else:
+        gp = GP(kernel=RBFKernel())
+
     bobe = BOBE(
         loglikelihood=rosenbrock_loglike,
         param_list=param_list,
         param_bounds=param_bounds,
         likelihood_name=f"determinism_{acq}_{seed}",
+        gp=gp,
         n_sobol_init=4,
         save=False,
         save_dir=save_dir,
-        use_clf=use_clf,
-        clf_type=clf_type,
-        clf_use_size=10,
         seed=seed,
         verbosity='ERROR',
-        gp_kwargs={},  # fresh dict per call — BOBE mutates this default
     )
 
     if acq == 'ei':

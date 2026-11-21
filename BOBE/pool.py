@@ -4,8 +4,7 @@ import jax.numpy as jnp
 from typing import Callable, Dict, List, Any, Union, Optional, Tuple
 from BOBE.utils.seed import set_global_seed, get_numpy_rng, get_new_jax_key
 from BOBE.utils.log import get_logger
-from BOBE.gp import GP
-from BOBE.clf_gp import GPwithClassifier
+from BOBE.surrogate import Surrogate
 from BOBE.likelihood import Likelihood, CobayaLikelihood
 log = get_logger('pool')
 
@@ -55,7 +54,7 @@ class MPI_Pool:
         # Static vs dynamic task dispatch
         self.dynamic_dispatch = dynamic_dispatch
 
-    def worker_wait(self, likelihood: Likelihood, gp: Union[GP, GPwithClassifier] = None, seed: Optional[int] = None):
+    def worker_wait(self, likelihood: Likelihood, gp: Optional[Surrogate] = None, seed: Optional[int] = None):
         """
         Main loop for worker processes. Workers wait for tasks from master and execute them.
         
@@ -90,43 +89,54 @@ class MPI_Pool:
         self._gp = gp
 
         # Wire format: every task message is (task_type, data) where
-        # data = (payload, task_index) for TASK_OBJECTIVE_EVAL / TASK_COBAYA_INIT / TASK_GP_FIT
+        # data = (payload, indices) for TASK_OBJECTIVE_EVAL / TASK_COBAYA_INIT (chunked;
+        #     payload and indices are parallel lists, length >= 1)
+        # data = (payload, task_index) for TASK_GP_FIT (single task)
         # data = None for TASK_EXIT / TASK_CLEAR_JAX_CACHES
         while True:
             # Wait for task from master
             task_data = self.comm.recv(source=0, tag=MPI.ANY_TAG)
             task_type, data = task_data
-            
+
             try:
                 if task_type == self.TASK_OBJECTIVE_EVAL:
-                    # Evaluate likelihood at a point
-                    point, task_index = data
-                    result = self._likelihood(point)
-                    self.comm.send((result, task_index), dest=0)
-                    
+                    # Evaluate likelihood at each point in the chunk
+                    points, indices = data
+                    results = []
+                    for pt, idx in zip(points, indices):
+                        try:
+                            results.append(self._likelihood(pt))
+                        except Exception as e:
+                            self.comm.send(("error", str(e), idx), dest=0)
+                            break
+                    else:
+                        self.comm.send((results, indices), dest=0)
+
                 elif task_type == self.TASK_GP_FIT:
-                    # Fit GP with given starting points
+                    # Fit surrogate with given starting points
                     payload, task_index = data
                     state_dict = payload['state_dict']
                     fit_params = payload['fit_params']
-                    use_clf = payload.get('use_clf', False)
 
-                    # Reconstruct GP from state dict
-                    if use_clf:
-                        worker_gp = GPwithClassifier.from_state_dict(state_dict)
-                    else:
-                        worker_gp = GP.from_state_dict(state_dict)
+                    worker_gp = Surrogate.from_state_dict(state_dict)
 
-                    # Fit GP and return results
+                    # Fit surrogate and return results
                     fit_results = worker_gp.fit(**fit_params)
                     self.comm.send((fit_results, task_index), dest=0)
 
                 elif task_type == self.TASK_COBAYA_INIT:
-                    # Get initial point from Cobaya reference prior
-                    _, task_index = data
-                    pt, logpost = self._likelihood._get_single_valid_point(rng)
-                    self.comm.send(((pt, logpost), task_index), dest=0)
-                
+                    # Generate one Cobaya initial point per index in the chunk
+                    _, indices = data
+                    results = []
+                    for idx in indices:
+                        try:
+                            results.append(self._likelihood._get_single_valid_point(rng))
+                        except Exception as e:
+                            self.comm.send(("error", str(e), idx), dest=0)
+                            break
+                    else:
+                        self.comm.send((results, indices), dest=0)
+
                 elif task_type == self.TASK_CLEAR_JAX_CACHES:
                     # Clear JAX caches on worker
                     jax.clear_caches()
@@ -134,7 +144,7 @@ class MPI_Pool:
                 elif task_type == self.TASK_EXIT:
                     log.info(f"Worker {self.rank} exiting")
                     break
-                    
+
             except Exception as e:
                 import traceback
                 log.error(f"Worker {self.rank} error: {e}")
@@ -143,7 +153,8 @@ class MPI_Pool:
                 if data is None:
                     pass  # TASK_EXIT / TASK_CLEAR_JAX_CACHES — nothing to report
                 else:
-                    _, task_index = data
+                    _, second = data
+                    task_index = second[0] if isinstance(second, list) else second
                     self.comm.send(("error", str(e), task_index), dest=0)
         
         return
@@ -181,16 +192,16 @@ class MPI_Pool:
         # Initial distribution to all available workers
         for worker_rank in range(1, self.size):
             if task_index < n_tasks:
-                payload = (tasks[task_index], task_index)
+                payload = ([tasks[task_index]], [task_index])
                 self.comm.send((task_type, payload), dest=worker_rank)
                 task_index += 1
                 tasks_in_progress += 1
-        
+
         # Receive results and distribute remaining tasks
         while tasks_in_progress > 0:
             status = MPI.Status()
-            
-            # The worker returns (result, original_index) or (error, msg, original_index)
+
+            # The worker returns (results_list, indices_list) or (error, msg, original_index)
             response = self.comm.recv(source=MPI.ANY_SOURCE, status=status)
             worker_rank = status.Get_source()
 
@@ -200,13 +211,13 @@ class MPI_Pool:
                 # Propagate the error to be handled by the caller
                 raise RuntimeError(f"Worker {worker_rank} failed: {msg}")
 
-            result, original_index = response
-            results[original_index] = result
+            chunk_results, chunk_indices = response
+            results[chunk_indices[0]] = chunk_results[0]
             tasks_in_progress -= 1
-            
+
             # If there are more tasks, send one to the newly freed worker
             if task_index < n_tasks:
-                payload = (tasks[task_index], task_index)
+                payload = ([tasks[task_index]], [task_index])
                 self.comm.send((task_type, payload), dest=worker_rank)
                 task_index += 1
                 tasks_in_progress += 1
@@ -218,8 +229,9 @@ class MPI_Pool:
         MASTER-ONLY METHOD: Distributes tasks statically (round-robin) across all ranks.
 
         Master participates in evaluation. Task i is always assigned to rank i % size,
-        making the assignment deterministic given (seed, nprocs). Uses the same
-        individual task messages as _dynamic_distribute — no extra task type needed.
+        making the assignment deterministic given (seed, nprocs). Each worker receives
+        its full chunk in a single message; the master then evaluates its own chunk
+        locally before collecting worker responses.
 
         Parameters
         ----------
@@ -244,30 +256,35 @@ class MPI_Pool:
             return []
 
         results = [None] * n_tasks
-        master_tasks = []  # (task, global_index) pairs for master to run locally
 
-        # Send each task to its pre-assigned rank (round-robin)
+        # Group tasks per rank by round-robin assignment
+        rank_chunks = [[] for _ in range(self.size)]
         for i, task in enumerate(tasks):
-            assigned_rank = i % self.size
-            if assigned_rank == 0:
-                master_tasks.append((task, i))
-            else:
-                self.comm.send((task_type, (task, i)), dest=assigned_rank)
+            rank_chunks[i % self.size].append((task, i))
 
-        # Master evaluates its own tasks locally
-        for task, idx in master_tasks:
+        # 1. Send each worker its full chunk in a single message
+        for r in range(1, self.size):
+            if not rank_chunks[r]:
+                continue
+            pts = [t for t, _ in rank_chunks[r]]
+            idxs = [i for _, i in rank_chunks[r]]
+            self.comm.send((task_type, (pts, idxs)), dest=r)
+
+        # 2. Master evaluates its own chunk locally while workers are computing
+        for task, idx in rank_chunks[0]:
             results[idx] = local_fn(task)
 
-        # Collect one response per non-master task
-        n_worker_tasks = n_tasks - len(master_tasks)
-        for _ in range(n_worker_tasks):
+        # 3. Collect one response per worker that received a chunk
+        n_responses = sum(1 for r in range(1, self.size) if rank_chunks[r])
+        for _ in range(n_responses):
             response = self.comm.recv(source=MPI.ANY_SOURCE)
             if len(response) == 3 and response[0] == "error":
-                _, msg, original_index = response
-                log.error(f"Worker failed on task {original_index}: {msg}")
-                raise RuntimeError(f"Worker failed on task {original_index}: {msg}")
-            result, original_index = response
-            results[original_index] = result
+                _, msg, failed_idx = response
+                log.error(f"Worker failed on task {failed_idx}: {msg}")
+                raise RuntimeError(f"Worker failed on task {failed_idx}: {msg}")
+            chunk_results, chunk_indices = response
+            for res, idx in zip(chunk_results, chunk_indices):
+                results[idx] = res
 
         return results
 
@@ -304,7 +321,7 @@ class MPI_Pool:
 
         return np.array(results)
 
-    def gp_fit(self, gp: GP, maxiters=1000, n_restarts=8, rng=None, use_pool=True):
+    def gp_fit(self, gp: Surrogate, maxiters=1000, n_restarts=8, rng=None, use_pool=True):
         """
         Orchestrates a parallel GP hyperparameter fit across MPI processes.
         
@@ -339,14 +356,15 @@ class MPI_Pool:
             n_restarts = min(n_restarts, 2 * self.size)
 
         rng = np.random.default_rng() if rng is None else rng
-        n_params = gp.hyperparam_bounds.shape[1]  # hp bounds are (2, n_params) shaped
- 
+        hyperparam_bounds = gp.get_hyperparam_bounds()
+        n_params = hyperparam_bounds.shape[1]  # hp bounds are (2, n_params) shaped
+
         # Prepare initial parameters for all restarts
         init_params = jnp.log(gp.get_hyperparams())
         if n_restarts > 1:
             x0_random = rng.uniform(
-                gp.hyperparam_bounds[0], 
-                gp.hyperparam_bounds[1], 
+                hyperparam_bounds[0],
+                hyperparam_bounds[1],
                 size=(n_restarts - 1, n_params)
             )
             x0 = np.vstack([init_params, x0_random])
@@ -372,9 +390,8 @@ class MPI_Pool:
             worker_x0 = x0_chunks[i]
             fit_params = {'x0': worker_x0, 'maxiter': maxiters}
             payload = {
-                'state_dict': state_dict, 
-                'fit_params': fit_params, 
-                'use_clf': isinstance(gp, GPwithClassifier)
+                'state_dict': state_dict,
+                'fit_params': fit_params,
             }
             self.comm.send((self.TASK_GP_FIT, (payload, i)), dest=i)
 

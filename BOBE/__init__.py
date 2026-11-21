@@ -34,6 +34,10 @@ MPI parallelization and logging are handled transparently - no explicit setup ne
 
 __version__ = "0.1.0"
 
+# Enable 64-bit floating-point precision in JAX once at package import
+import jax
+jax.config.update("jax_enable_x64", True)
+
 # Initialize logging before importing any modules that create loggers
 from .utils.log import setup_logging
 setup_logging(verbosity='INFO')  # Default verbosity, can be overridden in BOBE.__init__
@@ -42,6 +46,9 @@ setup_logging(verbosity='INFO')  # Default verbosity, can be overridden in BOBE.
 from .bo import BOBE, get_dimension_based_defaults
 from .gp import GP
 from .clf_gp import GPwithClassifier
+from .kernels import Kernel, RBFKernel, MaternKernel
+from .transforms import PrincipalAxesTransform
+from .surrogate import Surrogate, ClassifierMixin
 
 # Likelihood interfaces
 from .likelihood import Likelihood
@@ -74,6 +81,12 @@ __all__ = [
     "BOBE",
     "GP",
     "GPwithClassifier",
+    "Kernel",
+    "RBFKernel",
+    "MaternKernel",
+    "PrincipalAxesTransform",
+    "Surrogate",
+    "ClassifierMixin",
     # Utilities
     "get_dimension_based_defaults",
     # Likelihood classes

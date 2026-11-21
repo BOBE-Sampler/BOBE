@@ -6,15 +6,11 @@ import jax.numpy as jnp
 import jax.random as random
 import numpy as np
 import jax
-jax.config.update("jax_enable_x64", True)
-from numpyro.util import enable_x64
-enable_x64()
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
 from numpyro.infer.initialization import init_to_value
-from .gp import GP
-from .clf_gp import GPwithClassifier
+from .surrogate import Surrogate, ClassifierMixin
 from .utils.log import get_logger
 from .utils.seed import get_new_jax_key, get_numpy_rng
 from .utils.core import is_cluster_environment, renormalise_log_weights, resample_equal
@@ -52,7 +48,7 @@ def compute_integrals(logl=None, logvol=None, reweight=None,squared=False):
 def prior_transform(x):
     return x
         
-def nested_sampling_Dy(gp: GP,
+def nested_sampling_Dy(gp: Surrogate,
                        mode: str = 'acq',
                        ndim: int = 1,
                        dlogz: float = 0.1,
@@ -111,7 +107,7 @@ def nested_sampling_Dy(gp: GP,
 
     @jax.jit
     def loglike(x):
-        mu = gp.predict_mean_single(x)
+        mu = gp.predict_mean(x)
         return mu
 
     start = time.time()
@@ -126,7 +122,7 @@ def nested_sampling_Dy(gp: GP,
 
     rng = rng if rng is not None else get_numpy_rng()
 
-    if isinstance(gp, GPwithClassifier):
+    if isinstance(gp, ClassifierMixin):
         maxtries = 1000
         nlogl = 5000 * ndim
         x = rng.uniform(low=0., high=1., size=(nlogl, ndim))
@@ -169,7 +165,7 @@ def nested_sampling_Dy(gp: GP,
     log.debug(" Log Z evaluated using {} points".format(np.shape(logl))) 
     log.debug(f" Dynesty made {np.sum(res['ncall'])} function calls, max value of logl = {np.max(logl):.4f}")
 
-    var = jax.lax.map(gp.predict_var_single,samples_x,batch_size=100)
+    var = jax.lax.map(gp.predict_var, samples_x, batch_size=100)
     std = np.sqrt(var)
     logl_lower,logl_upper = logl - std, logl + std
     logvol = res['logvol']
@@ -193,7 +189,7 @@ def nested_sampling_Dy(gp: GP,
     samples_dict['weights'] = weights    
     return (samples_dict, logz_dict, success)
 
-def sample_GP_NUTS(gp: Union[GP, GPwithClassifier], 
+def sample_GP_NUTS(gp: Surrogate, 
                    np_rng=None, 
                    rng_key=None, 
                    num_chains=4, 
@@ -254,7 +250,7 @@ def sample_GP_NUTS(gp: Union[GP, GPwithClassifier],
             high=jnp.ones(shape)
         ))
         
-        mean = gp.predict_mean_batched(x)
+        mean = gp.predict_mean(x)
         numpyro.factor('y', mean/temp)
         numpyro.deterministic('logp', mean)
     

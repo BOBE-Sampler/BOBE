@@ -13,10 +13,11 @@ os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={os.cpu_count
 
 import numpy as np
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import sys
 from BOBE.gp import GP
+from BOBE.kernels import RBFKernel
+from BOBE.surrogate import Surrogate
 from BOBE.pool import MPI_Pool
 
 
@@ -30,16 +31,17 @@ def generate_test_gp(n_samples=20, d=2, seed=42):
     rng = np.random.RandomState(seed)
     X = rng.uniform(0, 1, size=(n_samples, d))
     y = -np.sum((X - 0.5)**2, axis=1, keepdims=True)
-    
+
     gp = GP(
         train_x=X,
         train_y=y,
-        noise=1e-6,
-        kernel="rbf",
-        lengthscales=jnp.array([0.3] * d),
-        kernel_variance=1.0
+        kernel=RBFKernel(
+            lengthscales=jnp.array([0.3] * d),
+            kernel_variance=1.0,
+            noise=1e-6,
+        ),
     )
-    
+
     return gp
 
 
@@ -124,20 +126,20 @@ def test_gp_fit_serial():
     gp = generate_test_gp(n_samples=25, d=2)
     
     print(f"Initial GP hyperparameters:")
-    print(f"  Lengthscales: {gp.lengthscales}")
-    print(f"  Kernel variance: {gp.kernel_variance:.4f}")
+    print(f"  Lengthscales: {gp.kernel.lengthscales}")
+    print(f"  Kernel variance: {gp.kernel.kernel_variance:.4f}")
     
     # Fit GP (serial mode)
     result = pool.gp_fit(gp, maxiters=200, n_restarts=1, use_pool=False)
     
     print(f"\nAfter fitting:")
     print(f"  MLL: {result['mll']:.4f}")
-    print(f"  Lengthscales: {gp.lengthscales}")
-    print(f"  Kernel variance: {gp.kernel_variance:.4f}")
+    print(f"  Lengthscales: {gp.kernel.lengthscales}")
+    print(f"  Kernel variance: {gp.kernel.kernel_variance:.4f}")
     
     # Verify hyperparameters were updated
-    assert gp.lengthscales is not None, "Lengthscales should be set"
-    assert gp.kernel_variance > 0, "Kernel variance should be positive"
+    assert gp.kernel.lengthscales is not None, "Lengthscales should be set"
+    assert gp.kernel.kernel_variance > 0, "Kernel variance should be positive"
     
     print(f"\n✓ GP fit successful")
     pool.close()
@@ -258,18 +260,18 @@ def test_gp_state_serialization_for_pool():
     print(f"State dict has {len(state)} keys")
     print(f"State dict keys: {list(state.keys())[:10]}...")  # Show first 10 keys
     
-    # Reconstruct GP from state
-    gp_reconstructed = GP.from_state_dict(state)
+    # Reconstruct GP from state via polymorphic Surrogate.from_state_dict (same path as MPI workers)
+    gp_reconstructed = Surrogate.from_state_dict(state)
     
     # Verify reconstruction
     assert gp_reconstructed.ndim == gp.ndim, "Dimensions don't match"
     assert gp_reconstructed.npoints == gp.npoints, "Number of points don't match"
-    assert jnp.allclose(gp_reconstructed.lengthscales, gp.lengthscales), "Lengthscales don't match"
+    assert jnp.allclose(gp_reconstructed.kernel.lengthscales, gp.kernel.lengthscales), "Lengthscales don't match"
     
     # Test prediction consistency
     test_point = jnp.array([0.5, 0.5])
-    mean1 = gp.predict_mean_single(test_point)
-    mean2 = gp_reconstructed.predict_mean_single(test_point)
+    mean1 = gp.predict_mean(test_point)
+    mean2 = gp_reconstructed.predict_mean(test_point)
     
     print(f"\nPrediction comparison:")
     print(f"  Original: {mean1:.4f}")

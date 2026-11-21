@@ -10,11 +10,13 @@ Tests include:
 """
 
 import numpy as np
+import pytest
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import sys
 from BOBE.clf_gp import GPwithClassifier
+from BOBE.kernels import RBFKernel
+from BOBE.surrogate import Surrogate, ClassifierMixin
 
 
 def generate_test_data_with_outliers(n_good=30, n_bad=20, d=2, seed=42):
@@ -54,7 +56,7 @@ def test_clf_gp_initialization_svm():
         clf_use_size=50,
         clf_threshold=5.0,
         gp_threshold=10.0,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     print(f"✓ Classifier data size: {gp_clf.clf_data_size}")
@@ -86,7 +88,7 @@ def test_clf_gp_initialization_nn():
         clf_use_size=50,
         clf_threshold=5.0,
         gp_threshold=10.0,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     print(f"✓ Classifier data size: {gp_clf.clf_data_size}")
@@ -116,7 +118,7 @@ def test_clf_gp_initialization_ellipsoid():
         clf_use_size=50,
         clf_threshold=5.0,
         gp_threshold=10.0,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     print(f"✓ Classifier data size: {gp_clf.clf_data_size}")
@@ -147,13 +149,13 @@ def test_clf_gp_predictions():
         gp_threshold=10.0,
         probability_threshold=0.5,
         minus_inf=-1e5,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     # Test prediction in good region
     good_point = jnp.array([0.5, 0.5])
-    mean_good = gp_clf.predict_mean_single(good_point)
-    var_good = gp_clf.predict_var_single(good_point)
+    mean_good = gp_clf.predict_mean(good_point)
+    var_good = gp_clf.predict_var(good_point)
     
     print(f"Prediction in good region [0.5, 0.5]:")
     print(f"  Mean: {mean_good:.4f}")
@@ -161,8 +163,8 @@ def test_clf_gp_predictions():
     
     # Test prediction in bad region
     bad_point = jnp.array([0.05, 0.05])
-    mean_bad = gp_clf.predict_mean_single(bad_point)
-    var_bad = gp_clf.predict_var_single(bad_point)
+    mean_bad = gp_clf.predict_mean(bad_point)
+    var_bad = gp_clf.predict_var(bad_point)
     
     print(f"\nPrediction in bad region [0.05, 0.05]:")
     print(f"  Mean: {mean_bad:.4f}")
@@ -177,8 +179,9 @@ def test_clf_gp_predictions():
     
     # Batched predictions
     test_points = jnp.array([[0.5, 0.5], [0.05, 0.05], [0.6, 0.4]])
-    means = gp_clf.predict_mean_batched(test_points)
-    vars = gp_clf.predict_var_batched(test_points)
+    means = gp_clf.predict_mean(test_points)
+    vars = gp_clf.predict_var(test_points)
+    means_joint, vars_joint = gp_clf.predict(test_points)
     
     print(f"\nBatch predictions:")
     for i, pt in enumerate(test_points):
@@ -186,6 +189,12 @@ def test_clf_gp_predictions():
     
     assert means.shape == (3,), "Batched means should have correct shape"
     assert vars.shape == (3,), "Batched variances should have correct shape"
+    np.testing.assert_allclose(means, means_joint, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(vars, vars_joint, rtol=1e-10, atol=1e-12)
+    for i in range(3):
+        mi, vi = gp_clf.predict(test_points[i])
+        np.testing.assert_allclose(means_joint[i], mi, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(vars_joint[i], vi, rtol=1e-10, atol=1e-12)
 
 
 def test_clf_gp_update():
@@ -203,7 +212,7 @@ def test_clf_gp_update():
         clf_use_size=30,
         clf_threshold=5.0,
         gp_threshold=10.0,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     initial_clf_size = gp_clf.clf_data_size
@@ -241,7 +250,7 @@ def test_clf_gp_classifier_training():
         clf_type='svm',
         clf_use_size=50,  # Higher than initial data
         clf_threshold=5.0,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     print(f"Initial state - Data: {gp_clf.clf_data_size}, Use classifier: {gp_clf.use_clf}")
@@ -277,7 +286,7 @@ def test_clf_gp_random_point():
         clf_type='svm',
         clf_use_size=50,
         clf_threshold=5.0,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     rng = np.random.default_rng(42)
@@ -312,7 +321,7 @@ def test_clf_gp_state_dict():
         clf_use_size=50,
         clf_threshold=5.0,
         gp_threshold=10.0,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     # Get state dict
@@ -332,8 +341,8 @@ def test_clf_gp_state_dict():
     
     # Test predictions match
     test_point = jnp.array([0.5, 0.5])
-    mean1 = gp_clf1.predict_mean_single(test_point)
-    mean2 = gp_clf2.predict_mean_single(test_point)
+    mean1 = gp_clf1.predict_mean(test_point)
+    mean2 = gp_clf2.predict_mean(test_point)
     
     print(f"\nPrediction at [0.5, 0.5]:")
     print(f"  Original: {mean1:.4f}")
@@ -358,7 +367,7 @@ def test_clf_gp_copy():
         train_y=y,
         clf_type='svm',
         clf_use_size=40,
-        noise=1e-6
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP")
     )
     
     gp_clf2 = gp_clf1.copy()
@@ -377,6 +386,83 @@ def test_clf_gp_copy():
     print(f"✓ Copy is independent")
 
 
+def test_clf_gp_requires_kernel_instance():
+    """GPwithClassifier requires a Kernel instance just like GP."""
+    with pytest.raises(TypeError):
+        GPwithClassifier()
+    with pytest.raises(TypeError):
+        GPwithClassifier(kernel="rbf")
+
+
+def test_clf_gp_deferred_initialization_and_interfaces():
+    """Test deferred GPwithClassifier init and Surrogate/ClassifierMixin conformance."""
+    X, y = generate_test_data_with_outliers(n_good=10, n_bad=5, d=2)
+    gp_clf = GPwithClassifier(
+        kernel=RBFKernel(lengthscale_prior="DSLP"),
+        clf_type='svm',
+        clf_use_size=100,
+        train_clf_on_init=False,
+    )
+    assert isinstance(gp_clf, Surrogate)
+    assert isinstance(gp_clf, ClassifierMixin)
+    assert gp_clf.ndim is None
+    assert gp_clf.npoints == 0
+    assert gp_clf.clf_data_size == 0
+
+    gp_clf.update(X, y.flatten())
+    assert gp_clf.ndim == 2
+    assert gp_clf.npoints == 15
+    assert gp_clf.clf_data_size == 15
+    assert np.isfinite(float(gp_clf.predict_mean(jnp.array([0.5, 0.5]))))
+
+    # Direct initialize(ndim=...) on a deferred instance
+    gp_clf_init = GPwithClassifier(
+        kernel=RBFKernel(lengthscale_prior="DSLP"),
+        clf_type='svm',
+        clf_use_size=100,
+    )
+    gp_clf_init.initialize(ndim=2)
+    assert gp_clf_init.ndim == 2
+    assert gp_clf_init.npoints == 0
+    assert gp_clf_init.train_x_clf.shape == (0, 2)
+    assert gp_clf_init.train_y_clf.shape == (0, 1)
+    gp_clf_init.update(X, y.flatten())
+    assert gp_clf_init.npoints == 15
+
+
+def test_clf_gp_surrogate_polymorphic_load(tmp_path):
+    """Test Surrogate.from_state_dict and Surrogate.load dispatch to GPwithClassifier."""
+    X, y = generate_test_data_with_outliers(n_good=35, n_bad=25, d=2)
+    gp_clf = GPwithClassifier(
+        kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP"),
+        train_x=X,
+        train_y=y,
+        clf_type='svm',
+        clf_use_size=50,
+        clf_threshold=5.0,
+        gp_threshold=10.0,
+    )
+    restored = Surrogate.from_state_dict(gp_clf.state_dict())
+    assert isinstance(restored, GPwithClassifier)
+    np.testing.assert_allclose(
+        restored.predict_mean(jnp.array([0.5, 0.5])),
+        gp_clf.predict_mean(jnp.array([0.5, 0.5])),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+    path = tmp_path / "clf_gp_poly"
+    gp_clf.save(str(path))
+    loaded = Surrogate.load(str(path))
+    assert isinstance(loaded, GPwithClassifier)
+    np.testing.assert_allclose(
+        loaded.predict_mean(jnp.array([0.5, 0.5])),
+        gp_clf.predict_mean(jnp.array([0.5, 0.5])),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
 def run_all_tests():
     """Run all clf_gp tests."""
     print("\n" + "="*80)
@@ -393,6 +479,8 @@ def run_all_tests():
         test_clf_gp_random_point,
         test_clf_gp_state_dict,
         test_clf_gp_copy,
+        test_clf_gp_requires_kernel_instance,
+        test_clf_gp_deferred_initialization_and_interfaces,
     ]
     
     passed = 0

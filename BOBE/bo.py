@@ -2,15 +2,11 @@ import os
 import numpy as np
 import jax
 import jax.numpy as jnp
-jax.config.update("jax_enable_x64", True)
-from typing import Optional, Union, Tuple, Dict, Any, Callable
-# from .acquisition import WIPV, EI #, logEI
-from .gp import GP
-from .clf_gp import GPwithClassifier
-from .transforms import prepare_rotation_inputs
+from typing import Optional, Union, Tuple, Dict, Any, Callable, List
+from .surrogate import Surrogate, ClassifierMixin
 from .likelihood import Likelihood, CobayaLikelihood
-from .utils.core import scale_from_unit, scale_to_unit,  resample_equal, kl_divergence_gaussian, get_threshold_for_nsigma
-from .utils.seed import set_global_seed, get_jax_key,  get_numpy_rng, get_new_jax_key
+from .utils.core import scale_from_unit, scale_to_unit, resample_equal, kl_divergence_gaussian
+from .utils.seed import set_global_seed, get_numpy_rng, get_new_jax_key
 from .samplers import nested_sampling_Dy, sample_GP_NUTS
 from .utils.log import get_logger, update_verbosity
 from .utils.results import BOBEResults
@@ -21,49 +17,6 @@ log = get_logger("bo")
 log.info(f'JAX using {jax.device_count()} devices.')
 
 _acq_funcs = {"wipv": WIPV, "ei": EI, "logei": LogEI, 'wipstd': WIPStd}
-
-
-def load_gp_file(filename: str, clf: bool) -> Union[GP, GPwithClassifier]:
-    """
-    Load a GP or GPwithClassifier object from a file.
-
-    Parameters
-    ----------
-    filename : str
-        The path to the file from which to load the GP object.
-
-    Returns
-    -------
-    Union[GP, GPwithClassifier]
-        The loaded GP or GPwithClassifier object.
-    """
-    if clf:
-        gp = GPwithClassifier.load(filename)
-    else:
-        gp = GP.load(filename)
-    return gp
-
-def load_gp_statedict(state_dict: Dict[str, Any], clf: bool) -> Union[GP, GPwithClassifier]:
-    """
-    Load a GP or GPwithClassifier object from a state dictionary.
-
-    Parameters
-    ----------
-    state_dict : dict
-        The state dictionary containing the GP parameters.
-    clf : bool
-        Whether to load a GPwithClassifier (True) or a standard GP (False).
-
-    Returns
-    -------
-    Union[GP, GPwithClassifier]
-        The loaded GP or GPwithClassifier object.
-    """
-    if clf:
-        gp = GPwithClassifier.from_state_dict(state_dict)
-    else:
-        gp = GP.from_state_dict(state_dict)
-    return gp
 
 def get_dimension_based_defaults(ndim: int):
     """
@@ -98,29 +51,24 @@ def get_dimension_based_defaults(ndim: int):
 class BOBE:
 
     def __init__(self,
-                loglikelihood: Union[Callable, str, Dict[str, Any], Likelihood],
+                 loglikelihood: Union[Callable, str, Dict[str, Any], Likelihood],
                  param_list: List[str] = None,
                  param_bounds=None,
                  param_labels=None,
                  likelihood_name=None,
                  confidence_for_unbounded=0.9999995,
-                 gp_kwargs: Dict[str, Any] = {},
-                 n_cobaya_init=4,
-                 n_sobol_init=4,
+                 gp: Optional[Surrogate] = None,
+                 n_cobaya_init: int = 4,
+                 n_sobol_init: int = 4,
                  init_train_x=None,
                  init_train_y=None,
-                 resume=False,
-                 resume_file=None,
-                 save_dir='.',
-                 save=True,
-                 save_step=5,
-                 optimizer='scipy',
-                 use_clf=False,
-                 clf_type = "svm",
-                 clf_nsigma_threshold=20,
-                 clf_use_size = 10,
-                 clf_update_step=1,
-                 minus_inf=-1e10,
+                 resume: bool = False,
+                 resume_file: Optional[str] = None,
+                 save_dir: str = '.',
+                 save: bool = True,
+                 save_step: int = 5,
+                 optimizer: str = 'scipy',
+                 minus_inf: float = -1e10,
                  seed: Optional[int] = None,
                  verbosity: str = 'INFO',
                  dynamic_dispatch: bool = False,
@@ -151,10 +99,12 @@ class BOBE:
         confidence_for_unbounded : float, optional
             Confidence level for unbounded Cobaya priors. Default is 0.9999995.
             Only used when loglikelihood is a Cobaya YAML file or dict.
-        gp_kwargs : dict, optional
-            Additional keyword arguments to pass to GP constructors. Default is {}.
+        gp : Surrogate, optional
+            Surrogate model instance (e.g. ``GP(kernel=RBFKernel(...))``).
+            Required when ``resume=False``. Ignored when resuming from
+            ``resume_file`` (the saved surrogate is loaded instead).
         n_cobaya_init : int, optional
-            Number of initial points from Cobaya reference distribution. 
+            Number of initial points from Cobaya reference distribution.
             Only used for CobayaLikelihood instances. Default is 4.
         n_sobol_init : int, optional
             Number of initial Sobol quasi-random points. Default is 4.
@@ -167,7 +117,7 @@ class BOBE:
         resume : bool, optional
             If True, resume from a previous run. Default is False.
         resume_file : str, optional
-            Path to resume from (directory containing GP file). Default is None.
+            Path to resume from (base path of saved GP file). Default is None.
         save_dir : str, optional
             Directory for saving results. Default is '.'.
         save : bool, optional
@@ -175,32 +125,20 @@ class BOBE:
         save_step : int, optional
             Save results every save_step iterations. Default is 5.
         optimizer : str, optional
-            Optimizer for GP and acquisition function. Options: 'scipy', 'optax'. Default is 'scipy'.
-        use_clf : bool, optional
-            Whether to use classifier for GP filtering. Default is True.
-        clf_type : str, optional
-            Classifier type: 'svm', 'nn', 'ellipsoid'. Default is 'svm'.
-        clf_nsigma_threshold : float, optional
-            N-sigma threshold for classifier training. Default is 20.
-        clf_use_size : int, optional
-            Minimum dataset size before using classifier. Default is 10.
-        clf_update_step : int, optional
-            Update classifier every clf_update_step iterations. Default is 1.
+            Optimizer for acquisition function optimization. Options: 'scipy', 'optax'.
+            Default is 'scipy'.
         minus_inf : float, optional
-            Value representing negative infinity for failed evaluations. Default is -1e10.
+            Value representing negative infinity for failed likelihood evaluations.
+            Default is -1e10.
         seed : int, optional
             Random seed for reproducibility. Default is None.
         verbosity : str, optional
             Logging verbosity level: 'DEBUG', 'INFO', 'WARNING', 'ERROR'. Default is 'INFO'.
         dynamic_dispatch : bool, optional
             If False (default), use static (round-robin) task distribution across MPI ranks.
-            Static dispatch is fully reproducible across runs at a fixed ``nprocs`` and seed
-            because task i always lands on rank i % nprocs, whose RNG is seeded deterministically.
-            If True, use dynamic dispatch (first-available worker). Dynamic dispatch can be
-            faster on heterogeneous tasks but yields non-deterministic task-to-worker assignment,
-            breaking reproducibility for any task that consumes randomness (notably
-            ``TASK_COBAYA_INIT``). Only set to True if reproducibility is not required.
-            
+            Static dispatch is fully reproducible across runs at a fixed ``nprocs`` and seed.
+            If True, use dynamic dispatch (first-available worker).
+
         Notes
         -----
         MPI parallelization is handled automatically and transparently. Users do not
@@ -211,46 +149,63 @@ class BOBE:
         loop and manages results. Worker processes enter a waiting loop after initialization
         and process tasks dispatched by the main process.
         """
+        if gp is not None and not isinstance(gp, Surrogate):
+            raise TypeError(
+                f"gp must be a Surrogate instance or None, got {type(gp).__name__}"
+            )
+        if not (resume and resume_file is not None) and gp is None:
+            raise ValueError(
+                "A surrogate instance (gp) must be provided when not resuming from a checkpoint."
+            )
 
         # Update logging verbosity if different from default
         update_verbosity(verbosity=verbosity)
-        
+
         # Initialize MPI pool
         self.pool = MPI_Pool(dynamic_dispatch=dynamic_dispatch)
         self.is_main = self.pool.is_main_process
         self.is_mpi = self.pool.is_mpi
-        
+
         # Convert to Likelihood instance and store for all processes
         self.loglikelihood = self._prepare_likelihood(
             loglikelihood, param_list, param_bounds, param_labels,
             likelihood_name, confidence_for_unbounded, minus_inf
         )
         self.ndim = len(self.loglikelihood.param_list)
-        
+
         if not self.is_main:
             # Workers only need likelihood and seed - everything else is handled in worker_wait
             self.pool.worker_wait(likelihood=self.loglikelihood, seed=seed)
             return  # Workers never return from worker_wait until pool.close()
-        
+
         # MAIN PROCESS FULL SETUP
         self._setup_main_process(
             seed, optimizer, save, save_dir, save_step,
-            n_cobaya_init, n_sobol_init, use_clf, clf_type,
-            clf_nsigma_threshold, minus_inf, resume, dynamic_dispatch
+            n_cobaya_init, n_sobol_init, minus_inf, resume, dynamic_dispatch
         )
-        
-        # handle resume if needed
+
+        # Handle resume if requested (always loads the surrogate from resume_file)
         if resume and resume_file is not None:
-            self._handle_resume(resume_file, use_clf)
+            if gp is not None:
+                log.info("Resuming from checkpoint file; ignoring passed gp instance.")
+            self._handle_resume(resume_file)
 
         # Fresh start path - generate and train initial GP (main process only)
         if self.fresh_start:
             self._handle_fresh_start(
-                n_cobaya_init, n_sobol_init, init_train_x, init_train_y,
-                use_clf, clf_type, clf_use_size, clf_update_step,
-                clf_nsigma_threshold, minus_inf, optimizer, gp_kwargs
+                gp=gp,
+                n_cobaya_init=n_cobaya_init,
+                n_sobol_init=n_sobol_init,
+                init_train_x=init_train_x,
+                init_train_y=init_train_y,
             )
-        
+
+        # Record resolved surrogate metadata in results manager
+        self.results_manager.settings['gp_class'] = type(self.gp).__name__
+        self.results_manager.settings['use_clf'] = isinstance(self.gp, ClassifierMixin)
+        if isinstance(self.gp, ClassifierMixin) and 'Classifier Training' not in self.results_manager.phase_times:
+            self.results_manager.phase_times['Classifier Training'] = 0.0
+
         # Finalize main process initialization
 
         # Extract best point from GP
@@ -261,21 +216,22 @@ class BOBE:
         else:
             best_f_from_gp = -np.inf
             self.best_pt = None
-        
+
         # Use restored best_f if available and better
         if not hasattr(self, 'best_f') or best_f_from_gp > getattr(self, 'best_f', -np.inf):
             self.best_f = best_f_from_gp
             if not hasattr(self, 'best_pt_iteration'):
                 self.best_pt_iteration = self.start_iteration
-        
+
         if self.best_pt is not None:
             self.best = {name: f"{float(val):.6f}" for name, val in zip(self.loglikelihood.param_list, self.best_pt)}
             log.info(f"Initial best point {self.best} with value = {self.best_f:.6f}")
-        
+
         # Save initial GP
-        self.gp.save(filename=f"{self.save_path}_gp")
-        log.info(f"Saving GP to file {self.save_path}_gp")
-        
+        if self.save:
+            self.gp.save(filename=f"{self.save_path}_gp")
+            log.info(f"Saving GP to file {self.save_path}_gp")
+
         # Initialize for KL divergence tracking
         self.prev_samples = None
 
@@ -317,8 +273,7 @@ class BOBE:
     
     
     def _setup_main_process(self, seed, optimizer, save, save_dir, save_step,
-                           n_cobaya_init, n_sobol_init, use_clf, clf_type,
-                           clf_nsigma_threshold, minus_inf, resume, dynamic_dispatch=False):
+                           n_cobaya_init, n_sobol_init, minus_inf, resume, dynamic_dispatch=False):
         """Setup full attributes for main process."""
         set_global_seed(seed)
         self.np_rng = get_numpy_rng()
@@ -348,9 +303,6 @@ class BOBE:
             settings={
                 'n_cobaya_init': n_cobaya_init,
                 'n_sobol_init': n_sobol_init,
-                'use_clf': use_clf,
-                'clf_type': clf_type,
-                'clf_nsigma_threshold': clf_nsigma_threshold,
                 'minus_inf': minus_inf,
                 'seed': seed,
                 'dynamic_dispatch': dynamic_dispatch
@@ -361,15 +313,15 @@ class BOBE:
         
         self.fresh_start = not resume
     
-    def _handle_resume(self, resume_file, use_clf):
+    def _handle_resume(self, resume_file):
         """Handle resume from existing run (main process only)."""
         try:
             log.info(f"Attempting to resume from file {resume_file}")
             gp_file = resume_file + '_gp'
-            self.gp = load_gp_file(gp_file, use_clf)
+            self.gp = Surrogate.load(gp_file)
             
             # Test GP functionality
-            _ = self.gp.predict_mean_single(self.gp.train_x[0])
+            _ = self.gp.predict_mean(self.gp.train_x[0])
             log.info(f"Loaded GP with {self.gp.train_x.shape[0]} training points")
             
             # Restore iteration and best point info
@@ -417,90 +369,94 @@ class BOBE:
             log.info("Starting a fresh run instead.")
             self.fresh_start = True
     
-    def _handle_fresh_start(self, n_cobaya_init, n_sobol_init, init_train_x, init_train_y,
-                           use_clf, clf_type, clf_use_size, clf_update_step,
-                           clf_nsigma_threshold, minus_inf, optimizer, gp_kwargs):
+    def _handle_fresh_start(self, gp, n_cobaya_init, n_sobol_init, init_train_x, init_train_y):
         """Handle fresh start initialization (main process only)."""
         self.start_iteration = 0
         self.best_pt_iteration = 0
         self.prev_converged = False
         self.prev_convergence_delta = None
         self.prev_convergence_threshold = None
-        
+
+        if gp is None:
+            raise ValueError(
+                "A surrogate instance (gp) must be provided for a fresh start."
+            )
+        if gp.npoints > 0:
+            raise ValueError(
+                "Pass an empty surrogate to BOBE; provide custom initial training "
+                "points via init_train_x and init_train_y in BOBE.__init__."
+            )
+        self.gp = gp
+        if self.gp.ndim is not None and self.gp.ndim != self.ndim:
+            raise ValueError(
+                f"Provided gp has ndim={self.gp.ndim}, expected {self.ndim} to match likelihood."
+            )
+
+        # Bind likelihood metadata (parameter names and any deferred physical-space kernel transform)
+        self.gp.bind_likelihood(
+            self.loglikelihood.param_bounds,
+            param_names=self.loglikelihood.param_list,
+        )
+
         # Generate and evaluate initial training points
+        has_init = (
+            n_sobol_init > 0
+            or (isinstance(self.loglikelihood, CobayaLikelihood) and n_cobaya_init > 0)
+            or init_train_x is not None
+            or init_train_y is not None
+        )
+        if not has_init:
+            raise ValueError(
+                "At least one of n_sobol_init, n_cobaya_init, or init_train_x/init_train_y "
+                "must provide initial training points."
+            )
+
         train_x, train_y = self._get_initial_training_data(
             n_cobaya_init=n_cobaya_init,
             n_sobol_init=n_sobol_init,
             init_train_x=init_train_x,
-            init_train_y=init_train_y
+            init_train_y=init_train_y,
         )
-        
-        # Initialize and train GP
-        self._initialize_gp(
-            train_x=train_x,
-            train_y=train_y,
-            use_clf=use_clf,
-            clf_type=clf_type,
-            clf_use_size=clf_use_size,
-            clf_update_step=clf_update_step,
-            clf_nsigma_threshold=clf_nsigma_threshold,
-            minus_inf=minus_inf,
-            optimizer=optimizer,
-            gp_kwargs=gp_kwargs
-        )
+
+        # Populate and fit the surrogate
+        self._initialize_gp(train_x=train_x, train_y=train_y)
 
 
     def _get_initial_training_data(self, n_cobaya_init, n_sobol_init, init_train_x=None, init_train_y=None):
         """
         Generate and evaluate initial training points for the GP.
-        
+
         This method:
-        1. Generates Sobol initial points in parallel
+        1. Generates Sobol initial points in parallel (if n_sobol_init > 0)
         2. Generates Cobaya initial points in parallel (if applicable)
         3. Adds user-provided initial points (if given)
         4. Removes duplicates
         5. Returns points and values in unit space for GP training
-        
-        Parameters
-        ----------
-        n_cobaya_init : int
-            Number of Cobaya initial points (only for CobayaLikelihood).
-        n_sobol_init : int
-            Number of Sobol initial points.
-        init_train_x : array-like, optional
-            User-provided initial training points in parameter space.
-        init_train_y : array-like, optional
-            User-provided initial training values.
-            
-        Returns
-        -------
-        train_x : jax.numpy.ndarray
-            Training points in unit cube space, shape (n_points, ndim).
-        train_y : jax.numpy.ndarray
-            Training values, shape (n_points, 1).
         """
-        if n_sobol_init + n_cobaya_init == 0:
-            raise ValueError("At least one of n_sobol_init or n_cobaya_init must be greater than zero.")
-        
-        # Generate Sobol points in parallel (generates minimum of 2 points)
-        all_points, all_vals = self._generate_sobol_points(n_sobol_init)
-        
-        # Generate Cobaya points if needed
+        point_chunks = []
+        val_chunks = []
+
+        if n_sobol_init > 0:
+            sobol_points, sobol_vals = self._generate_sobol_points(n_sobol_init)
+            if self.is_main and sobol_points.size > 0:
+                point_chunks.append(sobol_points)
+                val_chunks.append(sobol_vals)
+
         if isinstance(self.loglikelihood, CobayaLikelihood) and n_cobaya_init > 0:
             cobaya_points, cobaya_vals = self._generate_cobaya_points(n_cobaya_init)
             if self.is_main and cobaya_points.size > 0:
-                all_points = np.vstack([all_points, cobaya_points])
-                all_vals = np.vstack([all_vals, cobaya_vals])
-        
+                point_chunks.append(cobaya_points)
+                val_chunks.append(cobaya_vals)
+
         # Only main process continues with processing
         if not self.is_main:
             return None, None
-        
+
         # Add user-provided initial training data if available
         if init_train_x is not None and init_train_y is not None:
             init_train_x = np.atleast_2d(init_train_x)
             init_train_y = np.atleast_2d(init_train_y).reshape(-1, 1)
-            
+
             if init_train_x.shape[0] != init_train_y.shape[0]:
                 raise ValueError(
                     f"init_train_x and init_train_y must have same number of points. "
@@ -511,13 +467,16 @@ class BOBE:
                     f"init_train_x must have {self.ndim} dimensions. "
                     f"Got {init_train_x.shape[1]}"
                 )
-            
+
             log.info(f"Adding {len(init_train_x)} user-provided initial points")
-            all_points = np.vstack([all_points, init_train_x])
-            all_vals = np.vstack([all_vals, init_train_y])
+            point_chunks.append(init_train_x)
+            val_chunks.append(init_train_y)
         elif init_train_x is not None or init_train_y is not None:
             raise ValueError("Both init_train_x and init_train_y must be provided together")
-        
+
+        all_points = np.vstack(point_chunks)
+        all_vals = np.vstack(val_chunks)
+
         # Remove duplicates
         unique_points, unique_indices = np.unique(all_points, axis=0, return_index=True)
         if len(unique_points) < len(all_points):
@@ -530,13 +489,14 @@ class BOBE:
         else:
             init_points = all_points
             init_vals = all_vals
-        
-        self.results_manager.end_timing('True Objective Evaluations')
-        
+
+        if n_sobol_init > 0:
+            self.results_manager.end_timing('True Objective Evaluations')
+
         # Convert to unit space for GP
         train_x = jnp.array(scale_to_unit(init_points, self.loglikelihood.param_bounds))
         train_y = jnp.array(init_vals)
-        
+
         return train_x, train_y
 
     def _generate_sobol_points(self, n_sobol_init: int):
@@ -605,60 +565,26 @@ class BOBE:
         else:
             return np.empty((0, self.ndim)), np.empty((0, 1))
     
-    def _initialize_gp(self, train_x, train_y, use_clf, clf_type, clf_use_size, 
-                       clf_update_step, clf_nsigma_threshold, minus_inf, 
-                       optimizer, gp_kwargs):
+    def _initialize_gp(self, train_x=None, train_y=None):
         """
-        Initialize and train the GP or GPwithClassifier.
-        
-        Main process creates GP, workers will receive it via pool during fitting.
+        Populate the surrogate with initial training data and fit its
+        hyperparameters (main process only).
         """
-        # Only main process creates and trains GP
         if not self.is_main:
             return
 
-        # Prepare rotation
-        gp_kwargs = gp_kwargs.copy()  # Avoid mutating input dict
-        gp_kwargs['rotation_covariance'], gp_kwargs["rotation_samples"] = (
-            prepare_rotation_inputs(
-                covariance=gp_kwargs.get('rotation_covariance'),
-                samples=gp_kwargs.get('rotation_samples'),
-                param_bounds=self.loglikelihood.param_bounds,
-                rotation_dims=gp_kwargs.get('rotation_dims'),
-                rotation_space=gp_kwargs.pop('rotation_space', 'physical')
-            )
-        )
-        
-        # Update GP kwargs with training data
-        gp_kwargs.update({
-            'train_x': train_x, 
-            'train_y': train_y, 
-            'param_names': self.loglikelihood.param_list, 
-            'optimizer': optimizer
-        })
-        
-        # Create GP or GPwithClassifier
-        if use_clf:
-            clf_threshold = max(75, get_threshold_for_nsigma(clf_nsigma_threshold, self.ndim))
-            gp_kwargs.update({
-                'clf_type': clf_type,
-                'clf_use_size': clf_use_size,
-                'clf_update_step': clf_update_step,
-                'probability_threshold': 0.5,
-                'minus_inf': minus_inf,
-                'clf_threshold': clf_threshold,
-                'gp_threshold': 2 * clf_threshold
-            })
-            self.gp = GPwithClassifier(**gp_kwargs)
-        else:
-            self.gp = GP(**gp_kwargs)
-        
+        if train_x is not None and train_y is not None:
+            self.gp.update(train_x, train_y)
+
+        if isinstance(self.gp, ClassifierMixin):
+            self.gp.train_classifier()
+
         self.results_manager.start_timing('GP Training')
         log.info(f"Hyperparameters before refit: {self.gp.hyperparams_dict()}")
-        
+
         # Use pool to fit GP in parallel
         self.pool.gp_fit(self.gp, n_restarts=4, maxiters=500, rng=self.np_rng, use_pool=True)
-        
+
         log.info(f"Hyperparameters after refit: {self.gp.hyperparams_dict()}")
         self.results_manager.end_timing('GP Training')
     
@@ -720,11 +646,12 @@ class BOBE:
         self.results_manager.end_timing('GP Training')
 
         # Extract GP hyperparameters for tracking
-        lengthscales = list(self.gp.lengthscales)
-        kernel_variance = float(self.gp.kernel_variance)
-        self.results_manager.update_gp_hyperparams(step, lengthscales, kernel_variance)
+        if hasattr(self.gp, 'kernel'):
+            lengthscales = list(self.gp.kernel.lengthscales)
+            kernel_variance = float(self.gp.kernel.kernel_variance)
+            self.results_manager.update_gp_hyperparams(step, lengthscales, kernel_variance)
 
-        if isinstance(self.gp, GPwithClassifier):
+        if isinstance(self.gp, ClassifierMixin):
             self.results_manager.start_timing('Classifier Training')
             self.gp.train_classifier()
             self.results_manager.end_timing('Classifier Training')
@@ -803,7 +730,7 @@ class BOBE:
         for k, new_pt in enumerate(new_pts):
             new_pt_vals = {name: f"{float(val):.4f}" for name, val in zip(self.loglikelihood.param_list, new_pt.flatten())}
             log.debug(f"New point {new_pt_vals}, {k+1}/{len(new_pts)}")
-            predicted_val = self.gp.predict_mean_single(new_pts_u[k])
+            predicted_val = self.gp.predict_mean(new_pts_u[k])
             log.debug(f"Objective function value = {new_vals[k].item():.4f}, GP predicted value = {predicted_val.item():.4f}")
 
         return new_vals
@@ -843,7 +770,7 @@ class BOBE:
         }
         
         # Add classifier info if using GPwithClassifier, this can be done at the start since there are no results here, only settings.
-        if isinstance(self.gp, GPwithClassifier):
+        if isinstance(self.gp, ClassifierMixin):
             gp_info.update({
                 'classifier_used': bool(self.gp.use_clf),
                 'classifier_type': str(self.gp.clf_type),

@@ -1,139 +1,171 @@
+"""
+Classifier-GP module combining Gaussian Process regression with a classifier for selective training.
+"""
+
 import time
+from typing import List
 import numpy as np
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from .gp import GP, safe_noise_floor
-from .clf import (
-    CLASSIFIER_REGISTRY
-)
-from .transforms import PrincipalAxesTransform
-from .utils.seed import get_new_jax_key, get_numpy_rng
+from .kernels import Kernel
+from .surrogate import ClassifierMixin
+from .clf import CLASSIFIER_REGISTRY
+from .utils.seed import get_numpy_rng
 from .utils.log import get_logger
 from .utils.core import get_threshold_for_nsigma
 log = get_logger("clf_gp")
 
 
-class GPwithClassifier(GP):
-    def __init__(self, train_x=None, train_y=None,
-                 clf_type='svm', clf_settings={},
-                 clf_use_size=10, clf_update_step=1,
-                 probability_threshold=0.5, minus_inf=-1e5,
-                 clf_threshold=250., gp_threshold=500.,
-                 noise=1e-8, kernel="rbf", 
-                 optimizer="scipy", optimizer_options={},
-                 kernel_variance_bounds=[1e-4, 1e8], lengthscale_bounds=[0.01, 5.],
-                 tausq=None, tausq_bounds=[1e-4, 1e4],
-                 kernel_variance_prior=None, lengthscale_prior=None, 
-                 lengthscales=None, kernel_variance=1.0,
-                 rotation_covariance=None, rotation_samples=None,
-                 rotation_weights=None, rotation_log_weights=None,
-                 rotation_dims=None,
-                 param_names=None,
-                 train_clf_on_init=True,  # Prevent retraining on copy
-                 ):
+class GPwithClassifier(GP, ClassifierMixin):
+    def __init__(
+        self,
+        kernel: Kernel,
+        train_x=None,
+        train_y=None,
+        clf_type: str = 'svm',
+        clf_settings: dict = None,
+        clf_use_size: int = 10,
+        clf_update_step: int = 1,
+        probability_threshold: float = 0.5,
+        minus_inf: float = -1e5,
+        clf_threshold: float = 100.,
+        gp_threshold: float = 150.,
+        optimizer: str = "scipy",
+        optimizer_options: dict = None,
+        param_names: List[str] = None,
+        train_clf_on_init: bool = True,
+    ):
         """
         Generic Classifier-GP class combining a GP with a classifier. The GP is trained on the data points
         that are within the GP threshold of the maximum value of the GP.
 
-        Arguments
-        ---------
-        train_x : array-like, shape (n_samples, n_dim)
-            Initial training points.
-        train_y : array-like, shape (n_samples,)
+        Kernel hyperparameters, priors, bounds, observation noise, and any
+        kernel-metric transform are configured directly on the ``kernel``
+        instance (e.g. ``RBFKernel(...)`` or ``MaternKernel(...)``).
+
+        Parameters
+        ----------
+        kernel : Kernel
+            Kernel instance to use.
+        train_x : array-like, shape (n_samples, n_dim), optional
+            Initial training points in unit-cube coordinates. If ``None``,
+            dimension-dependent setup is deferred until ``initialize(ndim)``
+            or the first call to ``update()``.
+        train_y : array-like, shape (n_samples,), optional
             Initial training values.
         clf_type : str, optional
             Type of classifier ('svm', 'nn', 'ellipsoid', etc.). Default is 'svm'.
-        clf_params : dict, optional
-            Parameters specific to the chosen classifier. Default is None.
+        clf_settings : dict, optional
+            Parameters specific to the chosen classifier.
         clf_use_size : int, optional
-            Minimum number of points to start using the classifier. Default is 300.
+            Minimum number of points to start using the classifier. Default is 10.
         clf_update_step : int, optional
-            Update classifier every `clf_update_step` points after `clf_use_size` is reached. Default is 5.
+            Update classifier every `clf_update_step` points after `clf_use_size` is reached. Default is 1.
         probability_threshold : float, optional
-            Threshold for classifier probability/score to consider a point feasible (important for nn, ellipsoid). Default is 0.5.
+            Threshold for classifier probability/score to consider a point feasible. Default is 0.5.
         minus_inf : float, optional
             Value used for infeasible predictions. Default is -1e5.
         clf_threshold : float, optional
-            Threshold for initial classifier training labels (if used).
-            If None, `gp_threshold` might be used or a default calculated.
+            Threshold for classifier training labels. Default is 100.
         gp_threshold : float, optional
-            Threshold for adding points to the GP training set. Default is 5000.
-        noise, kernel, optimizer, kernel_variance_bounds, lengthscale_bounds, lengthscale_priors, lengthscales, kernel_variance:
-            GP parameters (see DSLP_GP/SAAS_GP). Note: bounds are now in actual space, not log10.
-        rotation_covariance, rotation_samples, rotation_weights, rotation_log_weights, rotation_dims:
-            Static kernel-metric rotation parameters. See GP for details.
-
+            Threshold for adding points to the GP training set. Default is 150.
+        optimizer : str, optional
+            Optimizer for GP hyperparameter tuning ('scipy' or 'optax'). Default is 'scipy'.
+        optimizer_options : dict, optional
+            Keyword arguments forwarded to the GP hyperparameter optimizer.
+        param_names : list of str, optional
+            Parameter names for logging hyperparameters.
+        train_clf_on_init : bool, optional
+            Whether to train the classifier during ``__init__`` when enough
+            data are present. Default is ``True``.
         """
-        # Store Data and Classifier Settings
-        self.train_x_clf = jnp.array(train_x)
-        self.train_y_clf = jnp.array(train_y).reshape(-1, 1) # Ensure 2D
+        if not isinstance(kernel, Kernel):
+            raise TypeError(
+                f"kernel must be a Kernel instance, got {type(kernel).__name__}"
+            )
+
+        # Store Classifier Settings
         self.clf_use_size = clf_use_size
         self.clf_update_step = clf_update_step
         self.clf_type = clf_type.lower()
-        self.clf_settings = clf_settings
+        self.clf_settings = {} if clf_settings is None else dict(clf_settings)
         self.clf_params = None
         self.clf_metrics = {}
         self.probability_threshold = probability_threshold
         self.minus_inf = minus_inf
-        
+
         # Store classifier functions and settings
         if self.clf_type not in CLASSIFIER_REGISTRY:
             raise ValueError(f"Unsupported classifier type: {self.clf_type}")
-        
+
         self.clf_train_fn = CLASSIFIER_REGISTRY[self.clf_type]['train_fn']
         self.clf_predict_fn = CLASSIFIER_REGISTRY[self.clf_type]['predict_fn']
 
         # Handle Thresholds
-        self.clf_threshold = clf_threshold 
+        self.clf_threshold = clf_threshold
         self.gp_threshold = gp_threshold
 
+        # Store and validate classifier data, then prepare GP subset
+        if train_x is not None:
+            if train_y is None:
+                raise ValueError("train_y must be provided when train_x is provided")
+            train_x_arr = jnp.asarray(train_x)
+            train_y_arr = jnp.asarray(train_y)
+            if train_x_arr.ndim != 2:
+                raise ValueError("train_x must be 2D")
+            if train_x_arr.shape[0] != train_y_arr.shape[0]:
+                raise ValueError("train_x and train_y must have the same number of points")
+            if train_y_arr.ndim != 2:
+                train_y_arr = train_y_arr.reshape(-1, 1)
 
-        # Prepare GP Data
-        if self.train_y_clf.size > 0:
-            mask_gp = self.train_y_clf.flatten() > (self.train_y_clf.max() - self.gp_threshold)
-            train_x_gp = self.train_x_clf[mask_gp]
-            train_y_gp = self.train_y_clf[mask_gp] 
+            self.train_x_clf = train_x_arr
+            self.train_y_clf = train_y_arr
+
+            if self.train_y_clf.size > 0:
+                mask_gp = self.train_y_clf.flatten() > (self.train_y_clf.max() - self.gp_threshold)
+                train_x_gp = self.train_x_clf[mask_gp]
+                train_y_gp = self.train_y_clf[mask_gp]
+            else:
+                train_x_gp = self.train_x_clf
+                train_y_gp = self.train_y_clf
         else:
-            train_x_gp = self.train_x_clf
-            train_y_gp = self.train_y_clf
+            self.train_x_clf = None
+            self.train_y_clf = None
+            train_x_gp = None
+            train_y_gp = None
 
-        # Initialize GP using inheritance
-        gp_init_kwargs = {
-            'train_x': train_x_gp,
-            'train_y': train_y_gp,
-            'noise': noise,
-            'kernel': kernel,
-            'optimizer': optimizer,
-            'optimizer_options': optimizer_options,
-            'kernel_variance_bounds': kernel_variance_bounds,
-            'lengthscale_bounds': lengthscale_bounds,
-            'lengthscales': lengthscales,
-            'kernel_variance': kernel_variance,
-            'lengthscale_prior': lengthscale_prior if lengthscale_prior is not None else "DSLP",
-            'kernel_variance_prior': kernel_variance_prior,
-            'tausq': tausq,
-            'tausq_bounds': tausq_bounds,
-            'rotation_covariance': rotation_covariance,
-            'rotation_samples': rotation_samples,
-            'rotation_weights': rotation_weights,
-            'rotation_log_weights': rotation_log_weights,
-            'rotation_dims': rotation_dims,
-            'param_names': param_names,
-        }
-                    
-        super().__init__(**gp_init_kwargs)
+        super().__init__(
+            kernel=kernel,
+            train_x=train_x_gp,
+            train_y=train_y_gp,
+            optimizer=optimizer,
+            optimizer_options=optimizer_options,
+            param_names=param_names,
+        )
 
         # Initialize Classifier
         self.use_clf = self.clf_data_size >= self.clf_use_size
-        self.clf_model_params = None
         self._clf_predict_func = None
 
         if self.use_clf:
-             if train_clf_on_init:
-                 self.train_classifier()
+            if train_clf_on_init:
+                self.train_classifier()
         else:
-             log.debug(f"Not enough data ({self.clf_data_size}) to use classifier (need {self.clf_use_size} points), or classifier type not set.")
+            log.debug(f"Not enough data ({self.clf_data_size}) to use classifier (need {self.clf_use_size} points), or classifier type not set.")
+
+    def initialize(self, ndim=None):
+        """
+        Complete all ndim-dependent initialisation for the GP and classifier.
+
+        Called immediately from ``__init__`` when training data are provided,
+        or from ``update()`` on first data arrival when constructed with
+        ``train_x=None``.
+        """
+        if ndim is not None:
+            self.train_x_clf = jnp.empty((0, ndim))
+            self.train_y_clf = jnp.empty((0, 1))
+        super().initialize(ndim=ndim)
 
     def train_classifier(self):
         """Public method to train/retrain the classifier."""
@@ -181,46 +213,31 @@ class GPwithClassifier(GP):
         log.debug(f"Trained {self.clf_type.upper()} classifier on {self.clf_data_size} points in {time.time() - start_time:.2f}s")
         log.debug(f"Classifier metrics: {self.clf_metrics}") # Use debug for detailed metrics
 
-    def predict_mean_single(self,x):
-        gp_mean = super().predict_mean_single(x)
+    def _clf_probs(self, x):
+        """Evaluate classifier feasibility probability for a single point or batch."""
+        x = jnp.asarray(x)
+        if x.ndim == 1:
+            return self._clf_predict_func(x)
+        return jax.vmap(self._clf_predict_func)(x)
+
+    def predict_mean(self, x):
+        gp_mean = super().predict_mean(x)
         if not self.use_clf or self._clf_predict_func is None:
             return gp_mean
 
-        clf_probs = self._clf_predict_func(x)
+        clf_probs = self._clf_probs(x)
         return jnp.where(clf_probs >= self.probability_threshold, gp_mean, self.minus_inf)
 
-    def predict_var_single(self,x):
-        var  = super().predict_var_single(x)
-        if not self.use_clf or self._clf_predict_func is None:
-            return var
-
-        clf_probs = self._clf_predict_func(x)
-        return jnp.where(clf_probs >= self.probability_threshold, var, safe_noise_floor)
-
-    def predict_mean_batched(self,x):
-        x = jnp.atleast_2d(x)
-        return jax.vmap(self.predict_mean_single)(x)
-
-    def predict_var_batched(self,x):
-        x = jnp.atleast_2d(x)
-        return jax.vmap(self.predict_var_single)(x)
-
-    def predict_single(self,x):
-        mean, var = super().predict_single(x)
+    def predict(self, x, *, standardized: bool = False):
+        mean, var = super().predict(x, standardized=standardized)
         if not self.use_clf or self._clf_predict_func is None:
             return mean, var
 
-        clf_probs = self._clf_predict_func(x)
-        mean = jnp.where(clf_probs >= self.probability_threshold, mean, self.minus_inf)
-        var = jnp.where(clf_probs >= self.probability_threshold, var, safe_noise_floor)
+        clf_probs = self._clf_probs(x)
+        feasible = clf_probs >= self.probability_threshold
+        mean = jnp.where(feasible, mean, self.minus_inf)
+        var = jnp.where(feasible, var, safe_noise_floor)
         return mean, var
-
-    def fantasy_var(self, new_x, mc_points,k_train_mc):
-        """
-        Computes the fantasy variance, see gp.py for more details.
-        Classifier logic could potentially be added here if needed.
-        """
-        return super().fantasy_var(new_x, mc_points,k_train_mc)
 
     def update(self, new_x, new_y):
         """
@@ -228,13 +245,37 @@ class GPwithClassifier(GP):
         Retrains classifier/GP based on thresholds and steps.
         """
         new_x = jnp.atleast_2d(new_x)
-        new_y = jnp.atleast_2d(new_y)
+        new_y = jnp.array(new_y)
+        if new_y.ndim != 2:
+            new_y = new_y.reshape(-1, 1)
 
-        # Check for duplicates in data 
+        # Complete deferred initialisation on first data arrival
+        if self.ndim is None:
+            self.initialize(ndim=new_x.shape[1])
+
+        # Filter NaN inputs / targets
+        if jnp.any(jnp.isnan(new_x)):
+            log.warning(f"NaN detected in new_x! Filtering out {jnp.sum(jnp.any(jnp.isnan(new_x), axis=1))} bad points.")
+            valid_mask = ~jnp.any(jnp.isnan(new_x), axis=1)
+            new_x = new_x[valid_mask]
+            new_y = new_y[valid_mask]
+            if new_x.shape[0] == 0:
+                log.warning("All new points contain NaN - skipping update.")
+                return
+        if jnp.any(jnp.isnan(new_y)):
+            log.warning(f"NaN detected in new_y! Filtering out {jnp.sum(jnp.any(jnp.isnan(new_y), axis=1))} bad points.")
+            valid_mask = ~jnp.any(jnp.isnan(new_y), axis=1)
+            new_x = new_x[valid_mask]
+            new_y = new_y[valid_mask]
+            if new_x.shape[0] == 0:
+                log.warning("All new points contain NaN - skipping update.")
+                return
+
+        # Check for duplicates in data
         new_pts_to_add = []
         new_vals_to_add = []
         for i in range(new_x.shape[0]):
-            if jnp.any(jnp.all(jnp.isclose(self.train_x_clf, new_x[i], atol=1e-6,rtol=1e-4), axis=1)):
+            if jnp.any(jnp.all(jnp.isclose(self.train_x_clf, new_x[i], atol=1e-6, rtol=1e-4), axis=1)):
                 log.debug(f"Point {new_x[i]} already exists in the training set, not updating")
             else:
                 new_pts_to_add.append(new_x[i])
@@ -247,20 +288,10 @@ class GPwithClassifier(GP):
             self.train_y_clf = jnp.concatenate([self.train_y_clf, new_vals_to_add], axis=0)
 
             mask_gp = self.train_y_clf.flatten() > (self.train_y_clf.max() - self.gp_threshold)
-            self.train_x = self.train_x_clf[mask_gp]
-            self.train_y = self.train_y_clf[mask_gp].reshape(-1, 1)
-            self.y_std = jnp.std(self.train_y) if self.train_y.shape[0] > 1 else 1.0
-            self.y_mean = jnp.mean(self.train_y)
-            self.train_y = (self.train_y - self.y_mean) / self.y_std
+            self._setup_training_data(self.train_x_clf[mask_gp], self.train_y_clf[mask_gp])
             self.recompute_cholesky()
 
-            log.debug(f"Classifier data size: {self.train_y_clf.shape[0]},  GP data size: {self.train_y.shape[0]}")
-
-    def kernel(self,x1,x2,lengthscales,kernel_variance,noise,include_noise=True):
-        """
-        Returns the kernel function used by the GP.
-        """
-        return super().kernel(x1,x2,lengthscales,kernel_variance,noise,include_noise=include_noise)
+            log.debug(f"Classifier data size: {self.train_y_clf.shape[0]}, GP data size: {self.train_y.shape[0]}")
 
     def get_random_point(self,rng=None, nstd = None):
 
@@ -302,8 +333,8 @@ class GPwithClassifier(GP):
         # Add classifier-specific data
         classifier_state = {
             # Classifier training data
-            'train_x_clf': np.array(self.train_x_clf),
-            'train_y_clf': np.array(self.train_y_clf),
+            'train_x_clf': np.array(self.train_x_clf) if self.train_x_clf is not None else None,
+            'train_y_clf': np.array(self.train_y_clf) if self.train_y_clf is not None else None,
             
             # Classifier configuration
             'clf_type': self.clf_type,
@@ -332,20 +363,11 @@ class GPwithClassifier(GP):
     @classmethod
     def from_state_dict(cls, state):
         """
-        Creates a GPwithClassifier instance from a state dictionary.
-        
-        Arguments
-        ---------
-        state: dict
-            State dictionary returned by state_dict()
-            
-        Returns
-        -------
-        gp_clf: GPwithClassifier
-            The reconstructed GPwithClassifier object
+        Create a GPwithClassifier instance from a state dictionary returned by ``state_dict()``.
         """
-        # Create GPwithClassifier instance
+        kernel = Kernel.from_state_dict(state['kernel_state'])
         gp_clf = cls(
+            kernel=kernel,
             train_x=state['train_x_clf'],
             train_y=state['train_y_clf'],
             clf_type=state['clf_type'],
@@ -356,45 +378,21 @@ class GPwithClassifier(GP):
             minus_inf=state['minus_inf'],
             clf_threshold=state['clf_threshold'],
             gp_threshold=state['gp_threshold'],
-            noise=state['noise'],
-            kernel=state['kernel_name'],
             optimizer=state['optimizer_method'],
             optimizer_options=state['optimizer_options'],
-            kernel_variance_bounds=state['kernel_variance_bounds'],
-            lengthscale_bounds=state['lengthscale_bounds'],
-            lengthscales=state['lengthscales'],
-            kernel_variance=state['kernel_variance'],
-            kernel_variance_prior=state.get('kernel_variance_prior_spec'),
-            lengthscale_prior=state.get('lengthscale_prior_spec'),
-            tausq=state.get('tausq', 1.0),
-            tausq_bounds=state.get('tausq_bounds', [-4, 4]),
-            train_clf_on_init=state.get('train_clf_on_init', True),
+            param_names=state.get('param_names'),
+            train_clf_on_init=state.get('train_clf_on_init', False),
         )
 
-        transform_state = state.get('input_transform_state')
+        if state.get('cholesky') is not None and state.get('alphas') is not None:
+            gp_clf.cholesky = jnp.array(state['cholesky'])
+            gp_clf.alphas = jnp.array(state['alphas'])
 
-        if transform_state is not None:
-            if transform_state['type'] != 'PrincipalAxesTransform':
-                raise ValueError(
-                    f"Unknown input transform: {transform_state['type']}"
-                )
-            transform = PrincipalAxesTransform.from_state_dict(
-                transform_state
-            )
-            gp_clf.kernel.set_input_transform(transform)
-            gp_clf.recompute_cholesky()
-        
-        # # Restore computed state if available
-        # if state.get('cholesky') is not None:
-        #     gp_clf.cholesky = jnp.array(state['cholesky'])
-        # if state.get('alphas') is not None:
-        #     gp_clf.alphas = jnp.array(state['alphas'])
-        
         # Restore classifier state
         gp_clf.use_clf = state['use_clf']
         gp_clf.clf_params = state.get('clf_params')
         gp_clf.clf_metrics = state.get('clf_metrics', {})
-        
+
         # Regenerate prediction function if classifier parameters exist
         if gp_clf.clf_params is not None:
             if gp_clf.clf_type == 'svm':
@@ -406,86 +404,18 @@ class GPwithClassifier(GP):
                 gp_clf._clf_predict_func = gp_clf.clf_predict_fn(
                     gp_clf.clf_params, gp_clf.clf_settings, d
                 )
-        
+
         return gp_clf
-
-    def save(self, filename='gp'):
-        """
-        Save the GPwithClassifier state to a file using state_dict.
-        
-        Arguments
-        ---------
-        filename: str
-            The filename to save to (with or without .npz extension). Default is 'gp'.
-        """
-        if not filename.endswith('.npz'):
-            filename += '.npz'
-        
-        state = self.state_dict()
-        np.savez(filename, **state)
-        log.info(f"Saved GPwithClassifier state to {filename}")
-
-    @classmethod
-    def load(cls, filename, **kwargs):
-        """
-        Loads a GPwithClassifier from a file
-        
-        Arguments
-        ---------
-        filename: str
-            The name of the file to load the GPwithClassifier from (with or without .npz extension)
-        **kwargs: 
-            Additional keyword arguments to pass to the GPwithClassifier constructor
-            
-        Returns
-        -------
-        gp_clf: GPwithClassifier
-            The loaded GPwithClassifier object
-        """
-        if not filename.endswith('.npz'):
-            filename += '.npz'
-            
-        try:
-            data = np.load(filename, allow_pickle=True)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Could not find file {filename}")
-        
-        # Convert arrays back to the expected format
-        state = {}
-        for key in data.files:
-            value = data[key]
-            if isinstance(value, np.ndarray) and value.shape == ():
-                # Handle scalar arrays
-                state[key] = value.item()
-            else:
-                state[key] = value
-        
-        # Apply any override kwargs
-        state.update(kwargs)
-        
-        # Use from_state_dict for loading
-        gp_clf = cls.from_state_dict(state)
-        
-        log.info(f"Loaded GPwithClassifier from {filename} with {gp_clf.train_x.shape[0]} training points")
-        return gp_clf
-
-    def copy(self):
-        """
-        Creates a deep copy of the GPwithClassifier using state_dict.
-        
-        Returns
-        -------
-        gp_clf_copy: GPwithClassifier
-            A deep copy of the current GPwithClassifier
-        """
-        state = self.state_dict()
-        return self.__class__.from_state_dict(state)
 
     @property
     def clf_data_size(self):
         """Size of the classifier's training inputs."""
+        if self.train_x_clf is None:
+            return 0
         return self.train_x_clf.shape[0]
     
     @property
     def npoints(self):
+        if self.train_x_clf is None:
+            return 0
         return self.train_x_clf.shape[0]

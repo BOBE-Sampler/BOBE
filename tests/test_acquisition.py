@@ -10,12 +10,14 @@ Tests include:
 """
 
 import numpy as np
+import pytest
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import sys
+from scipy.special import erfcx as scipy_erfcx
 from BOBE.gp import GP
-from BOBE.acquisition import EI, LogEI, WIPV
+from BOBE.kernels import RBFKernel, MaternKernel
+from BOBE.acquisition import EI, LogEI, WIPV, WIPStd, _erfcx_jax, _log1mexp_jax, get_mc_points
 
 
 def generate_test_gp(n_samples=30, d=2, seed=42):
@@ -24,16 +26,17 @@ def generate_test_gp(n_samples=30, d=2, seed=42):
     X = rng.uniform(0, 1, size=(n_samples, d))
     # Simple quadratic function with maximum at [0.7, 0.7]
     y = -np.sum((X - 0.7)**2, axis=1, keepdims=True)
-    
+
     gp = GP(
         train_x=X,
         train_y=y,
-        noise=1e-6,
-        kernel="rbf",
-        lengthscales=jnp.array([0.3] * d),
-        kernel_variance=1.0
+        kernel=RBFKernel(
+            lengthscales=jnp.array([0.3] * d),
+            kernel_variance=1.0,
+            noise=1e-6,
+        ),
     )
-    
+
     return gp
 
 
@@ -158,7 +161,7 @@ def test_ei_optimization():
     assert ei_val >= 0, f"EI value should be non-negative, got {ei_val}"
     
     # Predict at the new point
-    pred_mean = gp.predict_mean_single(next_point)
+    pred_mean = gp.predict_mean(next_point)
     print(f"GP prediction at next point: {pred_mean:.4f}")
     
     print(f"\n✓ EI optimization successful")
@@ -195,7 +198,7 @@ def test_logei_optimization():
     assert next_point.shape == (2,), f"Expected shape (2,), got {next_point.shape}"
     assert np.all(next_point >= 0) and np.all(next_point <= 1), "Point should be in unit cube"
     
-    pred_mean = gp.predict_mean_single(next_point)
+    pred_mean = gp.predict_mean(next_point)
     print(f"GP prediction at next point: {pred_mean:.4f}")
     
     print(f"\n✓ LogEI optimization successful")
@@ -248,13 +251,12 @@ def test_acquisition_with_different_gp_settings():
     
     # GP with RBF kernel
     gp_rbf = generate_test_gp(n_samples=20, d=2, seed=111)
-    gp_rbf.kernel_name = "rbf"
-    
+
     # GP with Matern kernel
     rng = np.random.RandomState(222)
     X = rng.uniform(0, 1, size=(20, 2))
     y = -np.sum((X - 0.7)**2, axis=1, keepdims=True)
-    gp_matern = GP(train_x=X, train_y=y, kernel="matern", noise=1e-6)
+    gp_matern = GP(train_x=X, train_y=y, kernel=MaternKernel(noise=1e-6))
     
     ei = EI()
     best_y = jnp.max(gp_rbf.train_y)
@@ -283,7 +285,7 @@ def test_acquisition_optimization_convergence():
     X = rng.uniform(0, 1, size=(30, 2))
     y = -np.sum((X - 0.8)**2, axis=1, keepdims=True)
     
-    gp = GP(train_x=X, train_y=y, noise=1e-6)
+    gp = GP(train_x=X, train_y=y, kernel=RBFKernel(noise=1e-6))
     ei = EI(optimizer="scipy")
     
     best_y = jnp.max(gp.train_y)
@@ -318,6 +320,60 @@ def test_acquisition_optimization_convergence():
     print(f"✓ Acquisition optimization converges to reasonable regions")
 
 
+def test_wip_acquisitions_and_mc_points():
+    """Test WIPV/WIPStd with fantasy cache and NaN/size handling in get_mc_points."""
+    gp = generate_test_gp(n_samples=20, d=2, seed=123)
+    rng = np.random.default_rng(123)
+    mc_points = rng.uniform(0.0, 1.0, size=(32, 2))
+
+    wipv = WIPV()
+    wipstd = WIPStd()
+    pt_v, val_v = wipv.get_next_point(
+        gp,
+        acq_kwargs={"mc_samples": {"x": mc_points}, "mc_points_size": 16},
+        maxiter=20,
+        n_restarts=1,
+        verbose=False,
+        rng=rng,
+    )
+    pt_s, val_s = wipstd.get_next_point(
+        gp,
+        acq_kwargs={"mc_samples": {"x": mc_points}, "mc_points_size": 16},
+        maxiter=20,
+        n_restarts=1,
+        verbose=False,
+        rng=rng,
+    )
+    assert pt_v.shape == (2,) and np.isfinite(val_v)
+    assert pt_s.shape == (2,) and np.isfinite(val_s)
+
+    mc_with_nans = {"x": np.array([[0.1, 0.2], [np.nan, 0.3], [0.4, 0.5], [0.6, 0.7]])}
+    pts = get_mc_points(mc_with_nans, mc_points_size=10, rng=np.random.default_rng(0))
+    assert pts.shape == (3, 2)
+    assert np.all(np.isfinite(pts))
+
+
+def test_pure_jax_erfcx_and_log1mexp():
+    """Test pure-JAX erfcx and log1mexp fallbacks for accuracy and finite gradients."""
+    xs = jnp.array([0.0, 0.5, 2.0, 10.0, 24.9, 25.1, 50.0, 1e3, 1e6])
+    vals = _erfcx_jax(xs)
+    expected = scipy_erfcx(np.asarray(xs))
+    np.testing.assert_allclose(np.asarray(vals), expected, rtol=1e-13, atol=1e-15)
+    assert jnp.all(jnp.isfinite(jax.vmap(jax.grad(_erfcx_jax))(xs[1:])))
+
+    ys = jnp.array([-1e-8, -0.1, -0.69, -0.70, -5.0, -50.0])
+    lvals = _log1mexp_jax(ys)
+    ys_np = np.asarray(ys)
+    lexpected = np.where(
+        ys_np > -np.log(2.0),
+        np.log(-np.expm1(ys_np)),
+        np.log1p(-np.exp(ys_np)),
+    )
+    np.testing.assert_allclose(np.asarray(lvals), lexpected, rtol=1e-13)
+    assert float(lvals[-1]) == pytest.approx(-np.exp(-50.0), rel=1e-12)
+    assert jnp.all(jnp.isfinite(jax.vmap(jax.grad(_log1mexp_jax))(ys)))
+
+
 def run_all_tests():
     """Run all acquisition function tests."""
     print("\n" + "="*80)
@@ -334,6 +390,8 @@ def run_all_tests():
         test_batch_acquisition,
         test_acquisition_with_different_gp_settings,
         test_acquisition_optimization_convergence,
+        test_wip_acquisitions_and_mc_points,
+        test_pure_jax_erfcx_and_log1mexp,
     ]
     
     passed = 0

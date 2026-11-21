@@ -9,8 +9,6 @@ logging, timing, and other helper functions.
 from .results import BOBEResults, load_bobe_results, create_resumable_results
 from .plot import BOBESummaryPlotter, plot_final_samples
 from .core import (
-    suppress_stdout_stderr, 
-    split_vmap, 
     scale_to_unit, 
     scale_from_unit, 
     renormalise_log_weights, 
@@ -26,7 +24,7 @@ __all__ = [
     # Plotting
     'BOBESummaryPlotter', 'plot_final_samples', 
     # Core utilities
-    'suppress_stdout_stderr', 'split_vmap', 'scale_to_unit', 'scale_from_unit',
+    'scale_to_unit', 'scale_from_unit',
     'renormalise_log_weights', 'resample_equal', 'is_cluster_environment',
     # Logging
     'get_logger', 'setup_logging',

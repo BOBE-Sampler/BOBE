@@ -10,6 +10,16 @@ COVARIANCE_2D = jnp.array([
     [0.06, 0.16],
 ])
 
+UNIT_BOUNDS_2D = jnp.array([
+    [0.0, 0.0],
+    [1.0, 1.0],
+])
+
+UNIT_BOUNDS_4D = jnp.array([
+    [0.0, 0.0, 0.0, 0.0],
+    [1.0, 1.0, 1.0, 1.0],
+])
+
 FULL_COVARIANCE_4D = jnp.array([
     [0.09, 0.00, 0.06, 0.00],
     [0.00, 0.04, 0.00, 0.00],
@@ -63,7 +73,8 @@ def squared_transformed_difference(transform, xa, xb):
 
 def test_covariance_rotation_diagonalises_covariance():
     transform = PrincipalAxesTransform(
-        covariance=COVARIANCE_2D
+        covariance=COVARIANCE_2D,
+        param_bounds=UNIT_BOUNDS_2D,
     )
 
     rotated_covariance = (
@@ -84,7 +95,8 @@ def test_covariance_rotation_diagonalises_covariance():
 
 def test_forward_inverse_round_trip():
     transform = PrincipalAxesTransform(
-        covariance=COVARIANCE_2D
+        covariance=COVARIANCE_2D,
+        param_bounds=UNIT_BOUNDS_2D,
     )
 
     x = jnp.array([
@@ -106,6 +118,7 @@ def test_partial_rotation_leaves_unselected_dimensions_unchanged():
     transform = PrincipalAxesTransform(
         covariance=COVARIANCE_2D,
         rotation_dims=[0, 2],
+        param_bounds=UNIT_BOUNDS_4D,
     )
 
     x = jnp.array([
@@ -126,6 +139,7 @@ def test_partial_rotation_forward_inverse_round_trip():
     transform = PrincipalAxesTransform(
         covariance=COVARIANCE_2D,
         rotation_dims=[0, 2],
+        param_bounds=UNIT_BOUNDS_4D,
     )
 
     x = jnp.array([
@@ -146,11 +160,13 @@ def test_full_and_reduced_covariance_give_same_metric():
     full_transform = PrincipalAxesTransform(
         covariance=FULL_COVARIANCE_4D,
         rotation_dims=[0, 2],
+        param_bounds=UNIT_BOUNDS_4D,
     )
 
     reduced_transform = PrincipalAxesTransform(
         covariance=COVARIANCE_2D,
         rotation_dims=[0, 2],
+        param_bounds=UNIT_BOUNDS_4D,
     )
 
     xa = jnp.array([0.15, 0.20, 0.35, 0.40])
@@ -182,11 +198,13 @@ def test_samples_and_covariance_give_same_metric():
     )
 
     sample_transform = PrincipalAxesTransform(
-        samples=SAMPLES_2D
+        samples=SAMPLES_2D,
+        param_bounds=UNIT_BOUNDS_2D,
     )
 
     covariance_transform = PrincipalAxesTransform(
-        covariance=covariance
+        covariance=covariance,
+        param_bounds=UNIT_BOUNDS_2D,
     )
 
     xa = jnp.array([0.15, 0.25])
@@ -218,10 +236,12 @@ def test_weighted_samples_and_covariance_give_same_metric():
     sample_transform = PrincipalAxesTransform(
         samples=SAMPLES_2D,
         weights=weights,
+        param_bounds=UNIT_BOUNDS_2D,
     )
 
     covariance_transform = PrincipalAxesTransform(
-        covariance=covariance
+        covariance=covariance,
+        param_bounds=UNIT_BOUNDS_2D,
     )
 
     xa = jnp.array([0.20, 0.30])
@@ -249,11 +269,13 @@ def test_log_weights_and_weights_give_same_metric():
     weighted_transform = PrincipalAxesTransform(
         samples=SAMPLES_2D,
         weights=weights,
+        param_bounds=UNIT_BOUNDS_2D,
     )
 
     log_weighted_transform = PrincipalAxesTransform(
         samples=SAMPLES_2D,
         log_weights=log_weights,
+        param_bounds=UNIT_BOUNDS_2D,
     )
 
     xa = jnp.array([0.20, 0.30])
@@ -285,11 +307,13 @@ def test_samples_can_be_supplied_as_reduced_chain():
     full_transform = PrincipalAxesTransform(
         samples=full_samples,
         rotation_dims=[0, 2],
+        param_bounds=UNIT_BOUNDS_4D,
     )
 
     reduced_transform = PrincipalAxesTransform(
         samples=SAMPLES_2D,
         rotation_dims=[0, 2],
+        param_bounds=UNIT_BOUNDS_4D,
     )
 
     xa = jnp.array([0.15, 0.20, 0.35, 0.40])
@@ -314,6 +338,7 @@ def test_state_dict_round_trip():
     transform = PrincipalAxesTransform(
         covariance=COVARIANCE_2D,
         rotation_dims=[0, 2],
+        param_bounds=UNIT_BOUNDS_4D,
     )
 
     restored = PrincipalAxesTransform.from_state_dict(
@@ -392,7 +417,8 @@ def test_covariance_must_be_square():
         match="Covariance matrix must be square",
     ):
         PrincipalAxesTransform(
-            covariance=jnp.ones((2, 3))
+            covariance=jnp.ones((2, 3)),
+            param_bounds=UNIT_BOUNDS_2D,
         )
 
 
@@ -402,7 +428,8 @@ def test_samples_must_be_two_dimensional():
         match=r"samples must have shape \(N, D\)",
     ):
         PrincipalAxesTransform(
-            samples=jnp.ones(5)
+            samples=jnp.ones(5),
+            param_bounds=UNIT_BOUNDS_2D,
         )
 
 
@@ -419,6 +446,7 @@ def test_invalid_rotation_dims(rotation_dims, message):
         PrincipalAxesTransform(
             covariance=COVARIANCE_2D,
             rotation_dims=rotation_dims,
+            param_bounds=UNIT_BOUNDS_2D,
         )
 
 
@@ -430,6 +458,7 @@ def test_rotation_dims_must_be_compatible_with_covariance():
         PrincipalAxesTransform(
             covariance=COVARIANCE_2D,
             rotation_dims=[0, 1, 3],
+            param_bounds=UNIT_BOUNDS_4D,
         )
 
 
@@ -441,6 +470,7 @@ def test_rotation_dims_must_be_compatible_with_samples():
         PrincipalAxesTransform(
             samples=SAMPLES_2D,
             rotation_dims=[0, 1, 3],
+            param_bounds=UNIT_BOUNDS_4D,
         )
 
 
@@ -452,6 +482,7 @@ def test_sample_weights_must_have_correct_shape():
         PrincipalAxesTransform(
             samples=SAMPLES_2D,
             weights=jnp.ones(3),
+            param_bounds=UNIT_BOUNDS_2D,
         )
 
 
@@ -463,6 +494,7 @@ def test_log_weights_must_have_correct_shape():
         PrincipalAxesTransform(
             samples=SAMPLES_2D,
             log_weights=jnp.ones(3),
+            param_bounds=UNIT_BOUNDS_2D,
         )
 
 
@@ -476,6 +508,7 @@ def test_sample_weights_must_be_non_negative():
         PrincipalAxesTransform(
             samples=SAMPLES_2D,
             weights=weights,
+            param_bounds=UNIT_BOUNDS_2D,
         )
 
 
@@ -489,6 +522,7 @@ def test_sample_weights_must_have_positive_total():
         PrincipalAxesTransform(
             samples=SAMPLES_2D,
             weights=weights,
+            param_bounds=UNIT_BOUNDS_2D,
         )
 
 
@@ -529,26 +563,16 @@ def test_prepare_physical_samples_to_unit_space():
 
 
 def test_full_and_reduced_physical_covariance_give_same_rotation():
-    full_covariance, _ = prepare_rotation_inputs(
-        covariance=PHYSICAL_COVARIANCE_4D,
-        param_bounds=PARAM_BOUNDS_4D,
-        rotation_dims=[0, 2],
-    )
-
-    reduced_covariance, _ = prepare_rotation_inputs(
-        covariance=PHYSICAL_COVARIANCE_02,
-        param_bounds=PARAM_BOUNDS_4D,
-        rotation_dims=[0, 2],
-    )
-
     full_transform = PrincipalAxesTransform(
-        covariance=full_covariance,
+        covariance=PHYSICAL_COVARIANCE_4D,
         rotation_dims=[0, 2],
+        param_bounds=PARAM_BOUNDS_4D,
     )
 
     reduced_transform = PrincipalAxesTransform(
-        covariance=reduced_covariance,
+        covariance=PHYSICAL_COVARIANCE_02,
         rotation_dims=[0, 2],
+        param_bounds=PARAM_BOUNDS_4D,
     )
 
     xa = jnp.array([0.15, 0.20, 0.35, 0.40])
@@ -588,26 +612,16 @@ def test_full_and_reduced_physical_samples_give_same_rotation():
         * PARAM_WIDTHS_4D[DIMS_02]
     )
 
-    _, full_samples_unit = prepare_rotation_inputs(
-        samples=physical_full_samples,
-        param_bounds=PARAM_BOUNDS_4D,
-        rotation_dims=[0, 2],
-    )
-
-    _, reduced_samples_unit = prepare_rotation_inputs(
-        samples=physical_reduced_samples,
-        param_bounds=PARAM_BOUNDS_4D,
-        rotation_dims=[0, 2],
-    )
-
     full_transform = PrincipalAxesTransform(
-        samples=full_samples_unit,
+        samples=physical_full_samples,
         rotation_dims=[0, 2],
+        param_bounds=PARAM_BOUNDS_4D,
     )
 
     reduced_transform = PrincipalAxesTransform(
-        samples=reduced_samples_unit,
+        samples=physical_reduced_samples,
         rotation_dims=[0, 2],
+        param_bounds=PARAM_BOUNDS_4D,
     )
 
     xa = jnp.array([0.15, 0.20, 0.35, 0.40])
@@ -628,29 +642,28 @@ def test_full_and_reduced_physical_samples_give_same_rotation():
     )
 
 
-def test_unit_rotation_inputs_are_unchanged():
-    covariance, samples = prepare_rotation_inputs(
+def test_physical_space_transform_deferred_bind_and_named_dims():
+    transform = PrincipalAxesTransform(
+        covariance=PHYSICAL_COVARIANCE_02,
+        rotation_dims=["a", "c"],
+    )
+    assert transform.rotation is None
+    with pytest.raises(RuntimeError, match="not bound"):
+        transform.forward(jnp.ones((2, 4)))
+
+    transform.bind_space(PARAM_BOUNDS_4D, param_names=["a", "b", "c", "d"])
+    assert transform.rotation is not None
+    np.testing.assert_array_equal(transform.rotation_dims, jnp.array([0, 2]))
+
+    reference = PrincipalAxesTransform(
         covariance=COVARIANCE_2D,
-        param_bounds=PARAM_BOUNDS_4D,
         rotation_dims=[0, 2],
-        rotation_space="unit",
+        param_bounds=UNIT_BOUNDS_4D,
     )
-
-    np.testing.assert_array_equal(
-        covariance,
-        COVARIANCE_2D,
+    xa = jnp.array([0.15, 0.20, 0.35, 0.40])
+    xb = jnp.array([0.75, 0.60, 0.55, 0.80])
+    np.testing.assert_allclose(
+        squared_transformed_difference(transform, xa, xb),
+        squared_transformed_difference(reference, xa, xb),
+        atol=1e-6,
     )
-    assert samples is None
-
-
-def test_invalid_rotation_space_raises():
-    with pytest.raises(
-        ValueError,
-        match="rotation_space must be either 'physical' or 'unit'",
-    ):
-        prepare_rotation_inputs(
-            covariance=COVARIANCE_2D,
-            param_bounds=PARAM_BOUNDS_4D,
-            rotation_dims=[0, 2],
-            rotation_space="banana",
-        )
