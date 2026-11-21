@@ -45,6 +45,7 @@ setup_logging(verbosity='INFO')  # Default verbosity, can be overridden in BOBE.
 # Core classes
 from .bo import BOBE, get_dimension_based_defaults
 from .gp import GP
+from .clf import Classifier, SVMClassifier, MLPClassifier, EllipsoidClassifier
 from .clf_gp import ClassifierGP
 from .kernels import Kernel, RBFKernel, MaternKernel
 from .transforms import PrincipalAxesTransform
@@ -81,6 +82,10 @@ __all__ = [
     "BOBE",
     "GP",
     "ClassifierGP",
+    "Classifier",
+    "SVMClassifier",
+    "MLPClassifier",
+    "EllipsoidClassifier",
     "Kernel",
     "RBFKernel",
     "MaternKernel",

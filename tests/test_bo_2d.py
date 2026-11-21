@@ -10,7 +10,7 @@ os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={os.cpu_count
 
 import numpy as np
 import sys
-from BOBE import BOBE, GP, ClassifierGP, RBFKernel, MaternKernel, PrincipalAxesTransform
+from BOBE import BOBE, GP, ClassifierGP, SVMClassifier, RBFKernel, MaternKernel, PrincipalAxesTransform
 
 
 def rosenbrock_loglike(x):
@@ -274,7 +274,7 @@ def test_bobe_with_classifier():
     
     gp = ClassifierGP(
         kernel=RBFKernel(lengthscale_prior="DSLP"),
-        clf_type='svm',
+        classifier=SVMClassifier(),
         clf_use_size=10,
         clf_threshold=75.0,
         gp_threshold=150.0,

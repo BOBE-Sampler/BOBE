@@ -4,7 +4,7 @@ os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count={}".format(
     os.cpu_count()
 )
 
-from BOBE import BOBE, ClassifierGP, RBFKernel
+from BOBE import BOBE, ClassifierGP, SVMClassifier, RBFKernel
 from BOBE.utils.core import renormalise_log_weights, scale_from_unit
 import time
 import matplotlib.pyplot as plt
@@ -22,7 +22,7 @@ def main():
 
     # Pass Cobaya YAML file path directly to BOBE
     kernel = RBFKernel(lengthscale_bounds=(1e-2, 5.0))
-    gp = ClassifierGP(kernel=kernel, clf_type='svm', optimizer='scipy')
+    gp = ClassifierGP(kernel=kernel, classifier=SVMClassifier(), optimizer='scipy')
     bobe = BOBE(
         loglikelihood=cobaya_input_file,
         likelihood_name=likelihood_name,

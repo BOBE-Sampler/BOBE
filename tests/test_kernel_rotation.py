@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import BOBE.acquisition as acquisition
 from BOBE.bo import BOBE, get_dimension_based_defaults
 from BOBE.gp import GP
+from BOBE.clf import SVMClassifier
 from BOBE.clf_gp import ClassifierGP
 from BOBE.kernels import RBFKernel, MaternKernel
 from BOBE.transforms import PrincipalAxesTransform
@@ -77,9 +78,9 @@ def make_surrogate(surrogate_cls=GP, kernel_cls=RBFKernel, **transform_kwargs):
     if surrogate_cls is ClassifierGP:
         return ClassifierGP(
             kernel=kernel,
+            classifier=SVMClassifier(),
             train_x=TRAIN_X_3D,
             train_y=TRAIN_Y_3D,
-            clf_type="svm",
             clf_use_size=100,
             train_clf_on_init=False,
             gp_threshold=500.0,
@@ -314,7 +315,7 @@ def test_surrogate_deferred_initialize_physical_rotation(surrogate_cls):
         input_transform=transform,
     )
     if surrogate_cls is ClassifierGP:
-        gp = ClassifierGP(kernel=kernel, clf_type="svm", clf_use_size=100)
+        gp = ClassifierGP(kernel=kernel, classifier=SVMClassifier(), clf_use_size=100)
     else:
         gp = GP(kernel=kernel)
 
@@ -360,9 +361,9 @@ def test_surrogate_adaptive_rotation_auto_binds_updates_and_round_trips(
     if surrogate_cls is ClassifierGP:
         gp = ClassifierGP(
             kernel=kernel,
+            classifier=SVMClassifier(),
             train_x=TRAIN_X_3D,
             train_y=TRAIN_Y_3D,
-            clf_type="svm",
             clf_use_size=100,
             train_clf_on_init=False,
             gp_threshold=500.0,
@@ -469,6 +470,7 @@ def test_batch_fantasy_gps_preserve_adapted_kernel_metric():
             kernel_variance=1.5,
             input_transform=transform,
         ),
+        classifier=SVMClassifier(),
         train_x=TRAIN_X_3D,
         train_y=TRAIN_Y_3D,
         clf_use_size=100,

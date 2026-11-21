@@ -71,7 +71,7 @@ mpi = [
     "mpi4py>=3.1.0"
 ]
 nn = [
-    "flax>=0.6.0",
+    "equinox>=0.10.0",
     "optax>=0.1.0"
 ]
 cobaya = [
@@ -83,7 +83,7 @@ cosmo = [
 ]
 all = [
     "mpi4py>=3.1.0",
-    "flax>=0.6.0",
+    "equinox>=0.10.0",
     "optax>=0.1.0",
     "cobaya>=3.0.0"
 ]

@@ -14,7 +14,7 @@ import numpy as np
 import sys
 import tempfile
 import shutil
-from BOBE import BOBE, GP, ClassifierGP, RBFKernel
+from BOBE import BOBE, GP, ClassifierGP, SVMClassifier, RBFKernel
 
 
 def rosenbrock_loglike(x):
@@ -22,7 +22,7 @@ def rosenbrock_loglike(x):
     return -((1 - x[0])**2 + 100 * (x[1] - x[0]**2)**2)
 
 
-def _run_bobe(acq, seed, save_dir, *, use_clf=False, clf_type='svm'):
+def _run_bobe(acq, seed, save_dir, *, use_clf=False, classifier_factory=SVMClassifier):
     """Run a short BOBE optimization and return the result dict."""
     param_bounds = np.array([[-2, 2], [-2, 2]]).T
     param_list = ['x', 'y']
@@ -30,7 +30,7 @@ def _run_bobe(acq, seed, save_dir, *, use_clf=False, clf_type='svm'):
     if use_clf:
         gp = ClassifierGP(
             kernel=RBFKernel(lengthscale_prior="DSLP"),
-            clf_type=clf_type,
+            classifier=classifier_factory(),
             clf_use_size=10,
             clf_threshold=75.0,
             gp_threshold=150.0,
@@ -153,7 +153,7 @@ def test_determinism_with_classifier():
     print("TEST: BOBE WIPStd + SVM classifier determinism (seed=456, two runs)")
     print("=" * 80)
 
-    pair = _run_pair('wipstd', seed=456, use_clf=True, clf_type='svm')
+    pair = _run_pair('wipstd', seed=456, use_clf=True)
     if pair is None:
         return
     _assert_runs_match(*pair, label='wipstd+svm seed=456')
