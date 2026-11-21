@@ -16,7 +16,7 @@ Gaussian Process with Classifier
 
 For handling constraints and invalid regions.
 
-.. autoclass:: BOBE.clf_gp.GPwithClassifier
+.. autoclass:: BOBE.clf_gp.ClassifierGP
    :members:
    :undoc-members:
    :show-inheritance:

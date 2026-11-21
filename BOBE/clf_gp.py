@@ -17,7 +17,7 @@ from .utils.core import get_threshold_for_nsigma
 log = get_logger("clf_gp")
 
 
-class GPwithClassifier(GP, ClassifierMixin):
+class ClassifierGP(GP, ClassifierMixin):
     def __init__(
         self,
         kernel: Kernel,
@@ -319,13 +319,13 @@ class GPwithClassifier(GP, ClassifierMixin):
     
     def state_dict(self):
         """
-        Returns a dictionary containing the complete state of the GPwithClassifier.
-        This can be used for saving, loading, or copying the GPwithClassifier.
+        Returns a dictionary containing the complete state of the ClassifierGP.
+        This can be used for saving, loading, or copying the ClassifierGP.
         
         Returns
         -------
         state: dict
-            Dictionary containing all necessary information to reconstruct the GPwithClassifier
+            Dictionary containing all necessary information to reconstruct the ClassifierGP
         """
         # Start with the base GP state
         state = super().state_dict()
@@ -352,7 +352,7 @@ class GPwithClassifier(GP, ClassifierMixin):
             'clf_metrics': self.clf_metrics,
             
             # Class identifier
-            'gp_class': 'GPwithClassifier'
+            'gp_class': 'ClassifierGP'
         }
         
         # Update the state with classifier-specific data
@@ -363,7 +363,7 @@ class GPwithClassifier(GP, ClassifierMixin):
     @classmethod
     def from_state_dict(cls, state):
         """
-        Create a GPwithClassifier instance from a state dictionary returned by ``state_dict()``.
+        Create a ClassifierGP instance from a state dictionary returned by ``state_dict()``.
         """
         kernel = Kernel.from_state_dict(state['kernel_state'])
         gp_clf = cls(

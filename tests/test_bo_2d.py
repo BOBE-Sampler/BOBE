@@ -10,7 +10,7 @@ os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={os.cpu_count
 
 import numpy as np
 import sys
-from BOBE import BOBE, GP, GPwithClassifier, RBFKernel, MaternKernel, PrincipalAxesTransform
+from BOBE import BOBE, GP, ClassifierGP, RBFKernel, MaternKernel, PrincipalAxesTransform
 
 
 def rosenbrock_loglike(x):
@@ -274,7 +274,7 @@ def test_bobe_with_classifier():
     param_bounds = np.array([[-2, 2], [-2, 2]]).T
     param_list = ['x', 'y']
     
-    gp = GPwithClassifier(
+    gp = ClassifierGP(
         kernel=RBFKernel(lengthscale_prior="DSLP"),
         clf_type='svm',
         clf_use_size=10,
@@ -312,7 +312,7 @@ def test_bobe_with_classifier():
     
     # Check results
     assert 'gp' in results
-    assert hasattr(results['gp'], 'use_clf'), "GP should be GPwithClassifier"
+    assert hasattr(results['gp'], 'use_clf'), "GP should be ClassifierGP"
     
     best_pt = results['best_pt']
     best_val = results['best_val']

@@ -2,7 +2,7 @@ import os
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count={}".format(
     os.cpu_count()
 )
-from BOBE import BOBE
+from BOBE import BOBE, GP, RBFKernel
 from BOBE.utils.core import renormalise_log_weights, scale_from_unit
 import time
 import matplotlib.pyplot as plt
@@ -33,17 +33,19 @@ def main():
     start = time.time()
     print("Starting BOBE run...")
 
-    # Initialize BOBE instance
+    # Initialize surrogate and BOBE instance
+    kernel = RBFKernel()
+    gp = GP(kernel=kernel, optimizer='scipy')
     bobe = BOBE(
         loglikelihood=loglike,
         param_list=param_list,
         param_bounds=param_bounds,
         param_labels=param_labels,
         likelihood_name=likelihood_name,
+        gp=gp,
         verbosity='INFO',
         n_sobol_init=8,
         optimizer='scipy',
-        use_clf=False,
         seed=42,
         save_dir='./results/',
         save=True,

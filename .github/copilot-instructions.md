@@ -13,7 +13,7 @@ BOBE is a Bayesian Optimization package for expensive likelihood functions, prim
 1. **BOBE (`BOBE/bo.py`)**: Primary orchestrator class that manages the entire BO loop
 2. **GP Models (`BOBE/gp.py`, `BOBE/clf_gp.py`)**: 
    - `GP`: Base Gaussian Process with JAX-based kernels (RBF, Matérn) and priors (DSLP, SAAS)
-   - `GPwithClassifier`: Extended GP with SVM/NN/Ellipsoid classifier to filter low-likelihood regions
+   - `ClassifierGP`: Extended GP with SVM/NN/Ellipsoid classifier to filter low-likelihood regions
 3. **Likelihood Interfaces (`BOBE/likelihood.py`)**:
    - `Likelihood`: Base class for any likelihood function
    - `CobayaLikelihood`: Interfaces with Cobaya for cosmological likelihoods (optional dependency)
@@ -53,7 +53,7 @@ enable_x64()
 - Training data stored in both spaces: `train_x` (unit), `train_x_clf` (unit for classifier GP)
 
 ### Classifier-GP Thresholds
-Two separate thresholds in `GPwithClassifier`:
+Two separate thresholds in `ClassifierGP`:
 - `clf_threshold`: For training classifier labels (e.g., 250 logL units below max)
 - `gp_threshold`: For selecting which points to train GP on (e.g., 500 logL units below max)
 - Points filtered by classifier before GP prediction to avoid wasted computation
@@ -140,7 +140,7 @@ Dynesty runs on GP surrogate (not true likelihood):
 - Returns samples, weights, logZ with error estimate
 
 ### Classifier Training Schedule
-In `GPwithClassifier`, classifier trains when:
+In `ClassifierGP`, classifier trains when:
 - Total points >= `clf_use_size` (default 10)
 - Every `clf_update_step` new points after threshold reached
 - Labels: 1 if within `clf_threshold` of max, 0 otherwise

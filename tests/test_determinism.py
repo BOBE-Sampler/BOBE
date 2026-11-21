@@ -14,7 +14,7 @@ import numpy as np
 import sys
 import tempfile
 import shutil
-from BOBE import BOBE, GP, GPwithClassifier, RBFKernel
+from BOBE import BOBE, GP, ClassifierGP, RBFKernel
 
 
 def rosenbrock_loglike(x):
@@ -28,7 +28,7 @@ def _run_bobe(acq, seed, save_dir, *, use_clf=False, clf_type='svm'):
     param_list = ['x', 'y']
 
     if use_clf:
-        gp = GPwithClassifier(
+        gp = ClassifierGP(
             kernel=RBFKernel(lengthscale_prior="DSLP"),
             clf_type=clf_type,
             clf_use_size=10,

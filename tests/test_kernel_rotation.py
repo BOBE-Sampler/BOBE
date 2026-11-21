@@ -1,6 +1,6 @@
 """
 Tests for kernel-metric rotation (PrincipalAxesTransform) at the kernel,
-GP, and GPwithClassifier levels.
+GP, and ClassifierGP levels.
 """
 
 from math import sqrt
@@ -10,7 +10,7 @@ import pytest
 import jax.numpy as jnp
 
 from BOBE.gp import GP
-from BOBE.clf_gp import GPwithClassifier
+from BOBE.clf_gp import ClassifierGP
 from BOBE.kernels import RBFKernel, MaternKernel
 from BOBE.transforms import PrincipalAxesTransform
 
@@ -79,8 +79,8 @@ def make_surrogate(surrogate_cls=GP, kernel_cls=RBFKernel, **transform_kwargs):
         noise=1e-8,
         input_transform=transform,
     )
-    if surrogate_cls is GPwithClassifier:
-        return GPwithClassifier(
+    if surrogate_cls is ClassifierGP:
+        return ClassifierGP(
             kernel=kernel,
             train_x=TRAIN_X_3D,
             train_y=TRAIN_Y_3D,
@@ -185,10 +185,10 @@ def test_rotation_does_not_change_kernel_diagonal(kernel_cls):
 
 
 # ---------------------------------------------------------------------------
-# Surrogate integration tests (GP and GPwithClassifier)
+# Surrogate integration tests (GP and ClassifierGP)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("surrogate_cls", [GP, GPwithClassifier])
+@pytest.mark.parametrize("surrogate_cls", [GP, ClassifierGP])
 @pytest.mark.parametrize("kernel_cls", [RBFKernel, MaternKernel])
 def test_surrogate_attaches_rotation_and_builds_consistent_cholesky(
     surrogate_cls, kernel_cls
@@ -201,13 +201,13 @@ def test_surrogate_attaches_rotation_and_builds_consistent_cholesky(
     np.testing.assert_allclose(gp.cholesky, jnp.linalg.cholesky(K), rtol=1e-6, atol=1e-7)
 
 
-@pytest.mark.parametrize("surrogate_cls", [GP, GPwithClassifier])
+@pytest.mark.parametrize("surrogate_cls", [GP, ClassifierGP])
 def test_surrogate_without_rotation_has_no_transform(surrogate_cls):
     gp = make_surrogate(surrogate_cls)
     assert gp.kernel.input_transform is None
 
 
-@pytest.mark.parametrize("surrogate_cls", [GP, GPwithClassifier])
+@pytest.mark.parametrize("surrogate_cls", [GP, ClassifierGP])
 def test_surrogate_rotation_affects_kernel(surrogate_cls):
     rotated = make_surrogate(surrogate_cls, covariance=COVARIANCE_3D)
     unrotated = make_surrogate(surrogate_cls)
@@ -260,7 +260,7 @@ def test_gp_rotation_dimension_validation():
         make_surrogate(GP, covariance=COVARIANCE_2D)
 
 
-@pytest.mark.parametrize("surrogate_cls", [GP, GPwithClassifier])
+@pytest.mark.parametrize("surrogate_cls", [GP, ClassifierGP])
 @pytest.mark.parametrize("kernel_cls", [RBFKernel, MaternKernel])
 def test_surrogate_state_dict_stores_final_transform_and_round_trips(
     surrogate_cls, kernel_cls
@@ -288,7 +288,7 @@ def test_surrogate_state_dict_stores_final_transform_and_round_trips(
     np.testing.assert_allclose(var_after, var_before, rtol=1e-6, atol=1e-7)
 
 
-@pytest.mark.parametrize("surrogate_cls", [GP, GPwithClassifier])
+@pytest.mark.parametrize("surrogate_cls", [GP, ClassifierGP])
 def test_surrogate_save_load_and_copy_preserve_rotation(surrogate_cls, tmp_path):
     gp = make_surrogate(surrogate_cls, covariance=COVARIANCE_3D)
     x = jnp.array([[0.30, 0.45, 0.55], [0.75, 0.25, 0.60]])
@@ -315,11 +315,11 @@ def test_gp_update_recomputes_cholesky_with_rotation():
 
 
 def test_classifier_gp_keeps_original_classifier_coordinates():
-    gp = make_surrogate(GPwithClassifier, covariance=COVARIANCE_3D)
+    gp = make_surrogate(ClassifierGP, covariance=COVARIANCE_3D)
     np.testing.assert_allclose(gp.train_x_clf, TRAIN_X_3D, atol=1e-7)
 
 
-@pytest.mark.parametrize("surrogate_cls", [GP, GPwithClassifier])
+@pytest.mark.parametrize("surrogate_cls", [GP, ClassifierGP])
 def test_surrogate_deferred_bind_likelihood_physical_rotation(surrogate_cls):
     phys_bounds = jnp.array([[-2.0, -4.0, 0.0], [2.0, 4.0, 10.0]])
     transform = PrincipalAxesTransform(
@@ -332,8 +332,8 @@ def test_surrogate_deferred_bind_likelihood_physical_rotation(surrogate_cls):
         lengthscale_prior="DSLP",
         input_transform=transform,
     )
-    if surrogate_cls is GPwithClassifier:
-        gp = GPwithClassifier(kernel=kernel, clf_type="svm", clf_use_size=100)
+    if surrogate_cls is ClassifierGP:
+        gp = ClassifierGP(kernel=kernel, clf_type="svm", clf_use_size=100)
     else:
         gp = GP(kernel=kernel)
 

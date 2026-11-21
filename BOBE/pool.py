@@ -65,7 +65,7 @@ class MPI_Pool:
         ----------
         likelihood : Likelihood
             The likelihood object for evaluating objective function.
-        gp : GP or GPwithClassifier, optional
+        gp : GP or ClassifierGP, optional
             The GP object, can be updated via state_dict broadcasts.
         seed : int, optional
             Random seed for the worker. If provided, will be offset by rank.
@@ -330,7 +330,7 @@ class MPI_Pool:
         
         Parameters
         ----------
-        gp : GP or GPwithClassifier
+        gp : GP or ClassifierGP
             Gaussian Process model to fit.
         maxiters : int, optional
             Maximum iterations for each optimization. Default is 1000.

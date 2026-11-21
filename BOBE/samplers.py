@@ -197,11 +197,11 @@ def sample_GP_NUTS(gp: Surrogate,
                    **kwargs):
     """
     Obtain samples from the posterior represented by the GP mean as the logprob.
-    This is a unified function that works for both GP and GPwithClassifier.
+    This is a unified function that works for both GP and ClassifierGP.
     
     Parameters
     ----------
-    gp : Union[GP, GPwithClassifier]
+    gp : Union[GP, ClassifierGP]
         The Gaussian Process model to sample from.
     np_rng : np.random.Generator, optional
         NumPy random number generator. Default is None.

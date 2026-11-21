@@ -10,7 +10,7 @@ likelihood.
 Main Components:
 - BOBE: Main Bayesian Optimization class (accepts raw callable or Likelihood)
 - GP: Gaussian Process implementation
-- GPwithClassifier: GP with SVM/NN/Ellipsoid classifier for filtering
+- ClassifierGP: GP with SVM/NN/Ellipsoid classifier for filtering
 - Likelihood classes: Likelihood, CobayaLikelihood (optional, wrapping handled automatically)
 - Acquisition functions: EI, LogEI, WIPV, WIPStd
 
@@ -45,7 +45,7 @@ setup_logging(verbosity='INFO')  # Default verbosity, can be overridden in BOBE.
 # Core classes
 from .bo import BOBE, get_dimension_based_defaults
 from .gp import GP
-from .clf_gp import GPwithClassifier
+from .clf_gp import ClassifierGP
 from .kernels import Kernel, RBFKernel, MaternKernel
 from .transforms import PrincipalAxesTransform
 from .surrogate import Surrogate, ClassifierMixin
@@ -80,7 +80,7 @@ __all__ = [
     # Core classes
     "BOBE",
     "GP",
-    "GPwithClassifier",
+    "ClassifierGP",
     "Kernel",
     "RBFKernel",
     "MaternKernel",

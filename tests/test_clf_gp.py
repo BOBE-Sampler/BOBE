@@ -1,5 +1,5 @@
 """
-Tests for GPwithClassifier functionality.
+Tests for ClassifierGP functionality.
 
 Tests include:
 - Initialization with different classifier types (SVM, NN, Ellipsoid)
@@ -14,7 +14,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import sys
-from BOBE.clf_gp import GPwithClassifier
+from BOBE.clf_gp import ClassifierGP
 from BOBE.kernels import RBFKernel
 from BOBE.surrogate import Surrogate, ClassifierMixin
 
@@ -41,14 +41,14 @@ def generate_test_data_with_outliers(n_good=30, n_bad=20, d=2, seed=42):
 
 
 def test_clf_gp_initialization_svm():
-    """Test GPwithClassifier initialization with SVM."""
+    """Test ClassifierGP initialization with SVM."""
     print("\n" + "="*80)
-    print("TEST: GPwithClassifier Initialization (SVM)")
+    print("TEST: ClassifierGP Initialization (SVM)")
     print("="*80)
     
     X, y = generate_test_data_with_outliers(n_good=40, n_bad=30, d=3)
     
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         train_x=X,
         train_y=y,
         clf_type='svm',
@@ -73,14 +73,14 @@ def test_clf_gp_initialization_svm():
 
 
 def test_clf_gp_initialization_nn():
-    """Test GPwithClassifier initialization with Neural Network."""
+    """Test ClassifierGP initialization with Neural Network."""
     print("\n" + "="*80)
-    print("TEST: GPwithClassifier Initialization (Neural Network)")
+    print("TEST: ClassifierGP Initialization (Neural Network)")
     print("="*80)
     
     X, y = generate_test_data_with_outliers(n_good=35, n_bad=25, d=2)
     
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         train_x=X,
         train_y=y,
         clf_type='nn',
@@ -103,14 +103,14 @@ def test_clf_gp_initialization_nn():
 
 
 def test_clf_gp_initialization_ellipsoid():
-    """Test GPwithClassifier initialization with Ellipsoid."""
+    """Test ClassifierGP initialization with Ellipsoid."""
     print("\n" + "="*80)
-    print("TEST: GPwithClassifier Initialization (Ellipsoid)")
+    print("TEST: ClassifierGP Initialization (Ellipsoid)")
     print("="*80)
     
     X, y = generate_test_data_with_outliers(n_good=35, n_bad=25, d=2)
     
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         train_x=X,
         train_y=y,
         clf_type='ellipsoid',
@@ -135,12 +135,12 @@ def test_clf_gp_initialization_ellipsoid():
 def test_clf_gp_predictions():
     """Test predictions with classifier filtering."""
     print("\n" + "="*80)
-    print("TEST: GPwithClassifier Predictions")
+    print("TEST: ClassifierGP Predictions")
     print("="*80)
     
     X, y = generate_test_data_with_outliers(n_good=40, n_bad=30, d=2)
     
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         train_x=X,
         train_y=y,
         clf_type='svm',
@@ -198,14 +198,14 @@ def test_clf_gp_predictions():
 
 
 def test_clf_gp_update():
-    """Test updating GPwithClassifier with new points."""
+    """Test updating ClassifierGP with new points."""
     print("\n" + "="*80)
-    print("TEST: GPwithClassifier Update")
+    print("TEST: ClassifierGP Update")
     print("="*80)
     
     X, y = generate_test_data_with_outliers(n_good=25, n_bad=15, d=2)
     
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         train_x=X,
         train_y=y,
         clf_type='svm',
@@ -244,7 +244,7 @@ def test_clf_gp_classifier_training():
     # Start with not enough data
     X_small, y_small = generate_test_data_with_outliers(n_good=15, n_bad=10, d=2)
     
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         train_x=X_small,
         train_y=y_small,
         clf_type='svm',
@@ -280,7 +280,7 @@ def test_clf_gp_random_point():
     
     X, y = generate_test_data_with_outliers(n_good=40, n_bad=30, d=2)
     
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         train_x=X,
         train_y=y,
         clf_type='svm',
@@ -306,14 +306,14 @@ def test_clf_gp_random_point():
 
 
 def test_clf_gp_state_dict():
-    """Test GPwithClassifier state save/load."""
+    """Test ClassifierGP state save/load."""
     print("\n" + "="*80)
-    print("TEST: GPwithClassifier State Save/Load")
+    print("TEST: ClassifierGP State Save/Load")
     print("="*80)
     
     X, y = generate_test_data_with_outliers(n_good=35, n_bad=25, d=2)
     
-    gp_clf1 = GPwithClassifier(
+    gp_clf1 = ClassifierGP(
         train_x=X,
         train_y=y,
         clf_type='svm',
@@ -331,7 +331,7 @@ def test_clf_gp_state_dict():
     print(f"Classifier type in state: {state.get('clf_type')}")
     
     # Create new instance from state
-    gp_clf2 = GPwithClassifier.from_state_dict(state)
+    gp_clf2 = ClassifierGP.from_state_dict(state)
     
     # Verify attributes match
     assert gp_clf2.clf_type == gp_clf1.clf_type, "Classifier type doesn't match"
@@ -355,14 +355,14 @@ def test_clf_gp_state_dict():
 
 
 def test_clf_gp_copy():
-    """Test GPwithClassifier copy functionality."""
+    """Test ClassifierGP copy functionality."""
     print("\n" + "="*80)
-    print("TEST: GPwithClassifier Copy")
+    print("TEST: ClassifierGP Copy")
     print("="*80)
     
     X, y = generate_test_data_with_outliers(n_good=30, n_bad=20, d=2)
     
-    gp_clf1 = GPwithClassifier(
+    gp_clf1 = ClassifierGP(
         train_x=X,
         train_y=y,
         clf_type='svm',
@@ -387,17 +387,17 @@ def test_clf_gp_copy():
 
 
 def test_clf_gp_requires_kernel_instance():
-    """GPwithClassifier requires a Kernel instance just like GP."""
+    """ClassifierGP requires a Kernel instance just like GP."""
     with pytest.raises(TypeError):
-        GPwithClassifier()
+        ClassifierGP()
     with pytest.raises(TypeError):
-        GPwithClassifier(kernel="rbf")
+        ClassifierGP(kernel="rbf")
 
 
 def test_clf_gp_deferred_initialization_and_interfaces():
-    """Test deferred GPwithClassifier init and Surrogate/ClassifierMixin conformance."""
+    """Test deferred ClassifierGP init and Surrogate/ClassifierMixin conformance."""
     X, y = generate_test_data_with_outliers(n_good=10, n_bad=5, d=2)
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         kernel=RBFKernel(lengthscale_prior="DSLP"),
         clf_type='svm',
         clf_use_size=100,
@@ -416,7 +416,7 @@ def test_clf_gp_deferred_initialization_and_interfaces():
     assert np.isfinite(float(gp_clf.predict_mean(jnp.array([0.5, 0.5]))))
 
     # Direct initialize(ndim=...) on a deferred instance
-    gp_clf_init = GPwithClassifier(
+    gp_clf_init = ClassifierGP(
         kernel=RBFKernel(lengthscale_prior="DSLP"),
         clf_type='svm',
         clf_use_size=100,
@@ -431,9 +431,9 @@ def test_clf_gp_deferred_initialization_and_interfaces():
 
 
 def test_clf_gp_surrogate_polymorphic_load(tmp_path):
-    """Test Surrogate.from_state_dict and Surrogate.load dispatch to GPwithClassifier."""
+    """Test Surrogate.from_state_dict and Surrogate.load dispatch to ClassifierGP."""
     X, y = generate_test_data_with_outliers(n_good=35, n_bad=25, d=2)
-    gp_clf = GPwithClassifier(
+    gp_clf = ClassifierGP(
         kernel=RBFKernel(noise=1e-6, lengthscale_prior="DSLP"),
         train_x=X,
         train_y=y,
@@ -443,7 +443,7 @@ def test_clf_gp_surrogate_polymorphic_load(tmp_path):
         gp_threshold=10.0,
     )
     restored = Surrogate.from_state_dict(gp_clf.state_dict())
-    assert isinstance(restored, GPwithClassifier)
+    assert isinstance(restored, ClassifierGP)
     np.testing.assert_allclose(
         restored.predict_mean(jnp.array([0.5, 0.5])),
         gp_clf.predict_mean(jnp.array([0.5, 0.5])),
@@ -454,7 +454,7 @@ def test_clf_gp_surrogate_polymorphic_load(tmp_path):
     path = tmp_path / "clf_gp_poly"
     gp_clf.save(str(path))
     loaded = Surrogate.load(str(path))
-    assert isinstance(loaded, GPwithClassifier)
+    assert isinstance(loaded, ClassifierGP)
     np.testing.assert_allclose(
         loaded.predict_mean(jnp.array([0.5, 0.5])),
         gp_clf.predict_mean(jnp.array([0.5, 0.5])),

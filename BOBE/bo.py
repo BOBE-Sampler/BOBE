@@ -769,7 +769,7 @@ class BOBE:
             'gp_final_best_loglike': float(self.best_f),  # Best value in true physical space
         }
         
-        # Add classifier info if using GPwithClassifier, this can be done at the start since there are no results here, only settings.
+        # Add classifier info if using ClassifierGP, this can be done at the start since there are no results here, only settings.
         if isinstance(self.gp, ClassifierMixin):
             gp_info.update({
                 'classifier_used': bool(self.gp.use_clf),
