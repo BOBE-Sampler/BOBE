@@ -91,3 +91,8 @@ all = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["BOBE*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: end-to-end BO and determinism tests (skipped by default; run with --runslow or -m slow)",
+]

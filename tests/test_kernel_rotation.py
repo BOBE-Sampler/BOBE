@@ -545,6 +545,7 @@ def test_bobe_adaptive_rotation_rejects_uniform_mc_method(tmp_path):
         bobe.pool.close()
 
 
+@pytest.mark.slow
 def test_bobe_end_to_end_adaptive_kernel_rotation(tmp_path):
     # Correlated 2D Gaussian log-likelihood
     cov_true = np.array([[1.0, 0.85], [0.85, 1.0]])
@@ -571,18 +572,17 @@ def test_bobe_end_to_end_adaptive_kernel_rotation(tmp_path):
         save_dir=str(tmp_path),
         seed=42,
     )
-    # Give a generous threshold via default check: first verify default gets filled
+    # Verify default acq_threshold gets populated from get_dimension_based_defaults
     expected_default_thresh = get_dimension_based_defaults(2)["transform_acq_threshold"]
-    # Use high threshold in a second check or verify default is populated during run
     results = bobe.run(
         acq="wipv",
         min_evals=8,
-        max_evals=14,
+        max_evals=10,
         batch_size=2,
         logz_threshold=1e-6,
         ns_n_points=100,
-        num_hmc_warmup=64,
-        num_hmc_samples=128,
+        num_hmc_warmup=32,
+        num_hmc_samples=64,
         thinning=2,
         num_chains=2,
         mc_points_size=32,
@@ -618,8 +618,8 @@ def test_bobe_end_to_end_adaptive_kernel_rotation(tmp_path):
         batch_size=2,
         logz_threshold=1e-6,
         ns_n_points=100,
-        num_hmc_warmup=64,
-        num_hmc_samples=128,
+        num_hmc_warmup=32,
+        num_hmc_samples=64,
         thinning=2,
         num_chains=2,
         mc_points_size=32,

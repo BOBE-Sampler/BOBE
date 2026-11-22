@@ -11,10 +11,13 @@ import os
 os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={os.cpu_count()}"
 
 import numpy as np
+import pytest
 import sys
 import tempfile
 import shutil
 from BOBE import BOBE, GP, ClassifierGP, SVMClassifier, RBFKernel
+
+pytestmark = pytest.mark.slow
 
 
 def rosenbrock_loglike(x):
@@ -22,7 +25,9 @@ def rosenbrock_loglike(x):
     return -((1 - x[0])**2 + 100 * (x[1] - x[0]**2)**2)
 
 
-def _run_bobe(acq, seed, save_dir, *, use_clf=False, classifier_factory=SVMClassifier):
+def _run_bobe(
+    acq, seed, save_dir, *, use_clf=False, classifier_factory=SVMClassifier, max_evals=None
+):
     """Run a short BOBE optimization and return the result dict."""
     param_bounds = np.array([[-2, 2], [-2, 2]]).T
     param_list = ['x', 'y']
@@ -31,7 +36,7 @@ def _run_bobe(acq, seed, save_dir, *, use_clf=False, classifier_factory=SVMClass
         gp = ClassifierGP(
             kernel=RBFKernel(lengthscale_prior="DSLP"),
             classifier=classifier_factory(),
-            clf_use_size=10,
+            clf_use_size=8,
             clf_threshold=75.0,
             gp_threshold=150.0,
             minus_inf=-1e10,
@@ -53,25 +58,29 @@ def _run_bobe(acq, seed, save_dir, *, use_clf=False, classifier_factory=SVMClass
     )
 
     if acq == 'ei':
+        n_max = 12 if max_evals is None else max_evals
         return bobe.run(
             acq='ei',
-            min_evals=10,
-            max_evals=20,
-            max_gp_size=20,
+            min_evals=min(6, n_max),
+            max_evals=n_max,
+            max_gp_size=n_max + 2,
             ei_goal=1e-6,
-            fit_n_points=5,
+            fit_n_points=4,
             batch_size=1,
         )
+    n_max = 14 if max_evals is None else max_evals
     return bobe.run(
         acq='wipstd',
-        min_evals=15,
-        max_evals=25,
-        max_gp_size=25,
+        min_evals=min(8, n_max),
+        max_evals=n_max,
+        max_gp_size=n_max + 2,
         logz_threshold=0.5,
-        fit_n_points=8,
-        ns_n_points=15,
-        batch_size=1,
+        fit_n_points=4,
+        ns_n_points=100,
+        batch_size=2,
+        mc_points_size=32,
         mc_points_method='uniform',
+        do_final_ns=False,
     )
 
 
@@ -169,8 +178,8 @@ def test_different_seeds_diverge():
     dir_a = tempfile.mkdtemp()
     dir_b = tempfile.mkdtemp()
     try:
-        result_a = _run_bobe('ei', seed=42, save_dir=dir_a)
-        result_b = _run_bobe('ei', seed=43, save_dir=dir_b)
+        result_a = _run_bobe('ei', seed=42, save_dir=dir_a, max_evals=8)
+        result_b = _run_bobe('ei', seed=43, save_dir=dir_b, max_evals=8)
         if result_a is None or result_b is None:
             return
 

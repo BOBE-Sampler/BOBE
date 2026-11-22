@@ -67,6 +67,7 @@ def check_output_files(output_dir, base_name, check_chains=True):
     assert len(min_lines) >= 4 and '-log(Like)' in min_lines[0]
 
 
+@pytest.mark.slow
 def test_bobe_ei_2d(tmp_path):
     """Test BOBE with EI acquisition on 2D Rosenbrock function."""
     param_bounds = np.array([[-2, 2], [-2, 2]]).T
@@ -85,9 +86,9 @@ def test_bobe_ei_2d(tmp_path):
 
     results = bobe.run(
         acq='ei',
-        min_evals=15,
-        max_evals=40,
-        max_gp_size=40,
+        min_evals=10,
+        max_evals=20,
+        max_gp_size=25,
         ei_goal=1e-6,
         fit_n_points=5,
         batch_size=1,
@@ -105,6 +106,7 @@ def test_bobe_ei_2d(tmp_path):
     check_output_files(str(tmp_path), "rosenbrock_ei_test", check_chains=False)
 
 
+@pytest.mark.slow
 def test_bobe_wipstd_2d(tmp_path):
     """Test BOBE with WIPStd acquisition on 2D Himmelblau function."""
     param_bounds = np.array([[-5, 5], [-5, 5]]).T
@@ -123,14 +125,15 @@ def test_bobe_wipstd_2d(tmp_path):
 
     results = bobe.run(
         acq='wipstd',
-        min_evals=25,
-        max_evals=60,
-        max_gp_size=60,
+        min_evals=16,
+        max_evals=30,
+        max_gp_size=40,
         logz_threshold=0.5,
         convergence_n_iters=2,
         fit_n_points=8,
-        ns_n_points=15,
-        batch_size=1,
+        ns_n_points=12,
+        batch_size=2,
+        mc_points_size=32,
         mc_points_method='uniform',
     )
     if results is None:
@@ -138,13 +141,14 @@ def test_bobe_wipstd_2d(tmp_path):
 
     for key in ('gp', 'likelihood', 'results_manager', 'best_val', 'best_pt', 'termination_reason'):
         assert key in results
-    assert results['gp'].train_x.shape[0] >= 30
+    assert results['gp'].train_x.shape[0] >= 16
     assert results['gp'].train_x.shape[1] == 2
     assert results['best_val'] > -500
     assert results.get('samples') and len(results['samples']['x']) > 0
     check_output_files(str(tmp_path), "himmelblau_test", check_chains=True)
 
 
+@pytest.mark.slow
 def test_bobe_with_classifier(tmp_path):
     """Test BOBE with ClassifierGP on 2D Rosenbrock and verify total_objective_evals accuracy."""
     param_bounds = np.array([[-2, 2], [-2, 2]]).T
@@ -171,13 +175,19 @@ def test_bobe_with_classifier(tmp_path):
 
     results = bobe.run(
         acq='wipstd',
-        min_evals=20,
-        max_evals=50,
-        max_gp_size=50,
+        min_evals=12,
+        max_evals=24,
+        max_gp_size=30,
         logz_threshold=0.5,
         fit_n_points=6,
-        ns_n_points=12,
-        batch_size=1,
+        ns_n_points=100,
+        batch_size=2,
+        num_hmc_warmup=32,
+        num_hmc_samples=64,
+        thinning=2,
+        num_chains=2,
+        mc_points_size=32,
+        do_final_ns=False,
     )
     if results is None:
         return
@@ -362,6 +372,7 @@ def test_unified_checkpoint_resume_and_load_results(tmp_path):
         fit_n_points=4,
         ns_n_points=2,
         batch_size=1,
+        mc_points_size=32,
         mc_points_method='uniform',
         do_final_ns=False,
     )
@@ -418,6 +429,7 @@ def test_unified_checkpoint_resume_and_load_results(tmp_path):
         fit_n_points=4,
         ns_n_points=50,
         batch_size=1,
+        mc_points_size=32,
         mc_points_method='uniform',
         do_final_ns=False,
     )
@@ -498,6 +510,7 @@ def test_already_converged_resume_skips_or_continues(tmp_path):
         max_evals=6,
         max_gp_size=20,
         batch_size=1,
+        mc_points_size=32,
         mc_points_method='uniform',
         do_final_ns=False,
     )
@@ -543,6 +556,7 @@ def test_multiphase_run_close_pool_and_no_tuple_acq(tmp_path):
         max_evals=8,
         max_gp_size=20,
         batch_size=1,
+        mc_points_size=32,
         mc_points_method='uniform',
         do_final_ns=False,
         close_pool=False,

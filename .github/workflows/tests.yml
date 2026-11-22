@@ -31,12 +31,12 @@ jobs:
     
     - name: Run tests
       run: |
-        pytest tests/ -v --tb=short
+        pytest tests/ --runslow -v --tb=short
     
     - name: Run tests with coverage
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
       run: |
-        pytest tests/ --cov=BOBE --cov-report=xml --cov-report=term
+        pytest tests/ --runslow --cov=BOBE --cov-report=xml --cov-report=term
     
     - name: Upload coverage to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
@@ -70,4 +70,4 @@ jobs:
     
     - name: Run tests
       run: |
-        pytest tests/ -v --tb=short
+        pytest tests/ --runslow -v --tb=short

@@ -408,13 +408,13 @@ def _make_mc_pool(m=32, d=3, seed=1):
 @pytest.mark.parametrize("share_mc_points, pool_size", [(False, 200), (True, 48)])
 def test_wip_greedy_batch_matches_copy_and_update(share_mc_points, pool_size):
     """
-    Large-N (discrete) regime: greedy cache conditioning selects the same batch
+    Discrete (scan-only) regime: greedy cache conditioning selects the same batch
     as the base-class path (GP copy + update per batch point).
     """
-    gp = _make_wip_gp(n=520, d=3, noise=1e-4, lengthscale=0.15)
+    gp = _make_wip_gp(n=40, d=3, noise=1e-4, lengthscale=0.15)
     pool = _make_mc_pool(m=pool_size)
     acq_kwargs = {"mc_samples": {"x": np.asarray(pool)}, "mc_points_size": 48}
-    acq = WIPStd(share_mc_points=share_mc_points, optimize_until_size=500)
+    acq = WIPStd(share_mc_points=share_mc_points, optimize_until_size=0)
 
     new_x, new_vals = acq.get_next_batch(
         gp, n_batch=3, acq_kwargs=acq_kwargs, rng=np.random.default_rng(0)
@@ -482,6 +482,7 @@ def test_share_mc_points_defaults_and_bo_plumbing(tmp_path):
         num_hmc_samples=32,
         mc_points_size=16,
         share_mc_points=True,
+        do_final_ns=False,
     )
     assert bobe.acquisition.share_mc_points is True
     assert bobe.results_manager.settings["share_mc_points"] is True
