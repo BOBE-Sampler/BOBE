@@ -15,7 +15,22 @@ except ImportError:
 
 log = get_logger("optim")
 
-def _get_optimizer(optimizer_name: str, learning_rate: float = 1e-3, optimizer_kwargs: Optional[dict] = {}):
+_SCIPY_DEFAULT_OPTIONS = {"method": "L-BFGS-B", "ftol": 1e-6, "gtol": 1e-6}
+
+
+def _copy_options(optimizer_options: Optional[dict], default: Optional[dict] = None) -> dict:
+    """
+    Return a private copy of ``optimizer_options`` (or of ``default`` when it is None).
+
+    The optimizers pop/insert keys while parsing their options; working on a copy keeps
+    the caller's dict (e.g. ``AcquisitionFunction.optimizer_options``) intact across calls.
+    """
+    if optimizer_options is None:
+        return dict(default) if default is not None else {}
+    return dict(optimizer_options)
+
+
+def _get_optimizer(optimizer_name: str, learning_rate: float = 1e-3, optimizer_kwargs: Optional[dict] = None):
     """Get the optax optimizer."""
     if not OPTAX_AVAILABLE:
         raise ImportError(
@@ -23,8 +38,8 @@ def _get_optimizer(optimizer_name: str, learning_rate: float = 1e-3, optimizer_k
             "Install it with: pip install 'BOBE[nn]' or pip install optax"
         )
     optimizer_name = optimizer_name.lower()
-    if 'learning_rate' not in optimizer_kwargs:
-        optimizer_kwargs['learning_rate'] = learning_rate
+    optimizer_kwargs = _copy_options(optimizer_kwargs)
+    optimizer_kwargs.setdefault('learning_rate', learning_rate)
 
     if optimizer_name == "adam":
         return optax.adam(**optimizer_kwargs)
@@ -71,11 +86,11 @@ def _setup_bounds(bounds: Optional[Union[List, Tuple, jnp.ndarray]], num_params:
 def optimize_optax(
     fun: Callable,
     fun_args: Optional[Tuple] = (),
-    fun_kwargs: Optional[dict] = {},
+    fun_kwargs: Optional[dict] = None,
     num_params: int = 1,
     bounds: Optional[Union[List, Tuple, jnp.ndarray]] = None,
     x0: jnp.ndarray = None,
-    optimizer_options: Optional[dict] = {"name": "adam", "lr": 1e-3, "early_stop_patience": 25},
+    optimizer_options: Optional[dict] = None,
     maxiter: int = 200,
     n_restarts: int = 1,
     verbose: bool = False,
@@ -83,7 +98,11 @@ def optimize_optax(
     """
     SEQUENTIAL OPTIMIZER: Minimize a function using JAX + optax,
     iterating through restarts with a Python for-loop.
-    
+
+    ``optimizer_options`` may contain ``name`` (default ``'adam'``), ``lr``
+    (default ``1e-3``), ``early_stop_patience`` (default ``25``) and any extra
+    optax keyword arguments. The caller's dict is never modified.
+
     Requires optax to be installed. Install with: pip install 'BOBE[nn]' or pip install optax
     """
     if not OPTAX_AVAILABLE:
@@ -91,6 +110,10 @@ def optimize_optax(
             "optax is required for optimize_optax. "
             "Install it with: pip install 'BOBE[nn]' or pip install optax"
         )
+
+    fun_args = () if fun_args is None else fun_args
+    fun_kwargs = {} if fun_kwargs is None else fun_kwargs
+    optimizer_options = _copy_options(optimizer_options)
 
     if x0 is None:
         raise ValueError("x0 must be provided (shape: (n_restarts, num_params))")
@@ -140,23 +163,35 @@ def optimize_optax(
         current_params = x0[restart_idx]
         opt_state = optimizer.init(current_params)
         best_f_for_restart = float("inf")
+        best_params_for_restart = current_params
         patience_counter = early_stop_patience
 
         for iter_idx in range(maxiter):
+            # ``step`` returns the objective at the params it was given, i.e. before
+            # the update, so the best value must be paired with ``params_before``.
+            params_before = current_params
             current_params, opt_state, current_value = step(current_params, opt_state)
             if current_value < best_f_for_restart:
                 best_f_for_restart = current_value
+                best_params_for_restart = params_before
                 patience_counter = early_stop_patience
             else:
                 patience_counter -= 1
-                if patience_counter == 0:
+                if patience_counter <= 0:
                     if verbose: log.debug(f"Early stopping at iter {iter_idx} (restart {restart_idx+1})")
                     break
             if verbose and iter_idx % 10 == 0: log.debug(f"Restart {restart_idx+1}, iter {iter_idx}, best={float(best_f_for_restart):.4e}")
 
+        # The last update is never scored inside the loop; score it once, reusing
+        # the compiled ``step`` (its update is discarded).
+        _, _, final_value = step(current_params, opt_state)
+        if final_value < best_f_for_restart:
+            best_f_for_restart = final_value
+            best_params_for_restart = current_params
+
         if best_f_for_restart < global_best_f:
             global_best_f = best_f_for_restart
-            global_best_params = current_params
+            global_best_params = best_params_for_restart
         if verbose: log.debug(f"Restart {restart_idx+1} done. Best={float(best_f_for_restart):.4e}")
 
     best_params_original = scale_from_unit(global_best_params, bounds_arr) if bounds_arr is not None else global_best_params
@@ -166,11 +201,11 @@ def optimize_optax(
 def optimize_optax_vmap(
     fun: Callable,
     fun_args: Optional[Tuple] = (),
-    fun_kwargs: Optional[dict] = {},
+    fun_kwargs: Optional[dict] = None,
     num_params: int = 1,
     bounds: Optional[Union[List, Tuple, jnp.ndarray]] = None,
     x0: jnp.ndarray = None,
-    optimizer_options: Optional[dict] = {"name": "adam", "lr": 1e-3, "early_stop_patience": 25},
+    optimizer_options: Optional[dict] = None,
     maxiter: int = 200,
     n_restarts: int = 1,
     verbose: bool = False,
@@ -178,7 +213,10 @@ def optimize_optax_vmap(
     """
     VECTORIZED OPTIMIZER: Minimize a function using JAX + optax,
     vectorizing over restarts with jax.vmap for parallel execution. Only to be used with EI.
-    
+
+    ``optimizer_options`` is parsed as in :func:`optimize_optax`; the caller's
+    dict is never modified.
+
     Requires optax to be installed. Install with: pip install 'BOBE[nn]' or pip install optax
     """
     if not OPTAX_AVAILABLE:
@@ -186,6 +224,10 @@ def optimize_optax_vmap(
             "optax is required for optimize_optax_vmap. "
             "Install it with: pip install 'BOBE[nn]' or pip install optax"
         )
+
+    fun_args = () if fun_args is None else fun_args
+    fun_kwargs = {} if fun_kwargs is None else fun_kwargs
+    optimizer_options = _copy_options(optimizer_options)
 
     if x0 is None:
         raise ValueError("x0 must be provided (shape: (n_restarts, num_params))")
@@ -224,16 +266,26 @@ def optimize_optax_vmap(
     patience_counters = jnp.full(n_restarts, early_stop_patience, dtype=jnp.int32)
     
     for iter_idx in range(maxiter):
+        # ``v_step`` returns the objective at the params it was given, i.e. before
+        # the update, so improvements must record ``params_before``.
+        params_before = params
         params, opt_state, current_vals = v_step(params, opt_state)
         improved_mask = current_vals < best_vals
         best_vals = jnp.where(improved_mask, current_vals, best_vals)
-        best_params = jnp.where(improved_mask[:, None], params, best_params)
+        best_params = jnp.where(improved_mask[:, None], params_before, best_params)
         patience_counters = jnp.where(improved_mask, early_stop_patience, patience_counters - 1)
-        
+
         if jnp.all(patience_counters <= 0):
             if verbose: log.debug(f"All restarts stopped early at iteration {iter_idx}")
             break
         if verbose and iter_idx % 10 == 0: log.debug(f"Iter {iter_idx}, best overall={float(jnp.min(best_vals)):.4e}")
+
+    # The last update of each restart is never scored inside the loop; score it
+    # once, reusing the compiled ``v_step`` (its update is discarded).
+    _, _, final_vals = v_step(params, opt_state)
+    improved_mask = final_vals < best_vals
+    best_vals = jnp.where(improved_mask, final_vals, best_vals)
+    best_params = jnp.where(improved_mask[:, None], params, best_params)
 
     best_restart_idx = jnp.argmin(best_vals)
     global_best_f = best_vals[best_restart_idx]
@@ -249,11 +301,11 @@ def optimize_optax_vmap(
 def optimize_scipy(
     fun: Callable,
     fun_args: Optional[Tuple] = (),
-    fun_kwargs: Optional[dict] = {},
+    fun_kwargs: Optional[dict] = None,
     num_params: int = 1,
     bounds: Optional[Union[List, Tuple, jnp.ndarray]] = None,
     x0: Optional[jnp.ndarray] = None,
-    optimizer_options: Optional[dict] = {"method": "L-BFGS-B", "ftol": 1e-6, "gtol": 1e-6},
+    optimizer_options: Optional[dict] = None,
     maxiter: int = 200,
     n_restarts: int = 4,
     verbose: bool = False,
@@ -274,9 +326,13 @@ def optimize_scipy(
     bounds: Optional[Union[List, Tuple, jnp.ndarray]]
         Parameter bounds in shape (2, num_params).
     x0: Optional[jnp.ndarray]
-        Initial guess for the parameters, rescaled to unit space.
-    optimizer_kwargs: Optional[dict]
-        Additional keyword arguments to pass to the optimizer.
+        Initial guess for the parameters in the same space as ``bounds``,
+        shape ``(n_restarts, num_params)`` or ``(num_params,)``.
+    optimizer_options: Optional[dict]
+        ``method`` (default ``'L-BFGS-B'``) plus keyword options forwarded to
+        ``scipy.optimize.minimize``. If ``None``, uses
+        ``{'method': 'L-BFGS-B', 'ftol': 1e-6, 'gtol': 1e-6}``. The caller's
+        dict is never modified.
     maxiter: int
         Maximum number of iterations.
     n_restarts: int
@@ -289,6 +345,9 @@ def optimize_scipy(
         The best parameters found and the corresponding function value.
     """
 
+    fun_args = () if fun_args is None else fun_args
+    fun_kwargs = {} if fun_kwargs is None else fun_kwargs
+    optimizer_options = _copy_options(optimizer_options, default=_SCIPY_DEFAULT_OPTIONS)
     optimizer_options.update({'maxiter': maxiter})
 
     method = optimizer_options.pop("method", "L-BFGS-B")

@@ -153,9 +153,10 @@ class AcquisitionFunction:
 
     name: str = "BaseAcquisitionFunction"
 
-    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = {}):
+    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = None):
         self.optimizer = optimizer
-        self.optimizer_options = optimizer_options
+        # Private copy: the optimizers must never see (or alias) a caller's dict.
+        self.optimizer_options = {} if optimizer_options is None else dict(optimizer_options)
         if self.optimizer == "scipy":
             self.acq_optimize = optimize_scipy
         else:
@@ -271,7 +272,7 @@ class EI(AcquisitionFunction):
 
     name: str = "EI"
 
-    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = {}):
+    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = None):
         super().__init__(optimizer=optimizer, optimizer_options=optimizer_options)
 
         if optimizer == 'optax':
@@ -366,7 +367,7 @@ class LogEI(EI):
 
     name: str = "LogEI"
 
-    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = {}):
+    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = None):
         super().__init__(optimizer=optimizer, optimizer_options=optimizer_options)
 
     def fun(self, x, gp, best_y, zeta):
@@ -398,7 +399,7 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
         Additional options for the optimizer. Default is {}.
     """
 
-    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = {}):
+    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = None):
         super().__init__(optimizer=optimizer, optimizer_options=optimizer_options)
 
     def get_next_point(self, gp,
