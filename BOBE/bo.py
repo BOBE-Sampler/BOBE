@@ -633,7 +633,7 @@ class BOBE:
             self.gp.train_classifier()
             self.results_manager.end_timing('Classifier Training')
 
-    def get_next_batch(self, acq_kwargs, n_batch, n_restarts, maxiter, early_stop_patience, step, verbose=True):
+    def get_next_batch(self, acq_kwargs, n_batch, step, n_restarts=None, maxiter=None, verbose=True):
         """Get the next batch of points using the acquisition function, and track acquisition values."""
         if not self.is_main:
             return None, None
@@ -646,7 +646,6 @@ class BOBE:
             acq_kwargs=acq_kwargs,
             n_restarts=n_restarts,
             maxiter=maxiter,
-            early_stop_patience=early_stop_patience,
         )
         self.results_manager.end_timing('Acquisition Optimization')
 
@@ -1226,9 +1225,6 @@ class BOBE:
             new_pts_u, acq_vals = self.get_next_batch(
                 acq_kwargs,
                 n_batch=n_batch,
-                n_restarts=50,
-                maxiter=1000,
-                early_stop_patience=50,
                 step=ii,
                 verbose=verbose,
             )
@@ -1308,9 +1304,6 @@ class BOBE:
             new_pts_u, acq_vals = self.get_next_batch(
                 acq_kwargs,
                 n_batch=self.batch_size,
-                n_restarts=1,
-                maxiter=100,
-                early_stop_patience=10,
                 step=ii,
                 verbose=verbose,
             )

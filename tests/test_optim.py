@@ -6,6 +6,8 @@ import pytest
 
 from BOBE.acquisition import EI, WIPStd
 from BOBE.optim import (
+    _SCIPY_DEFAULT_OPTIONS,
+    _copy_options,
     _get_optimizer,
     _setup_bounds,
     optimize_optax,
@@ -163,6 +165,11 @@ def test_optimizer_options_not_mutated_across_calls():
     caller_opts["method"] = "Nelder-Mead"
     assert ei.optimizer_options["method"] == "L-BFGS-B"
     assert wip.optimizer_options["method"] == "L-BFGS-B"
+
+    # Empty dict from default AcquisitionFunction/GP still receives scipy defaults
+    assert _copy_options(None, default=_SCIPY_DEFAULT_OPTIONS) == _SCIPY_DEFAULT_OPTIONS
+    assert _copy_options({}, default=_SCIPY_DEFAULT_OPTIONS) == _SCIPY_DEFAULT_OPTIONS
+    assert _copy_options({"method": "TNC"}, default=_SCIPY_DEFAULT_OPTIONS) == {"method": "TNC"}
 
 
 @pytest.mark.parametrize("opt_fn", [optimize_scipy, optimize_optax, optimize_optax_vmap])

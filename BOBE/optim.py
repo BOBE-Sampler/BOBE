@@ -20,12 +20,13 @@ _SCIPY_DEFAULT_OPTIONS = {"method": "L-BFGS-B", "ftol": 1e-6, "gtol": 1e-6}
 
 def _copy_options(optimizer_options: Optional[dict], default: Optional[dict] = None) -> dict:
     """
-    Return a private copy of ``optimizer_options`` (or of ``default`` when it is None).
+    Return a private copy of ``optimizer_options`` (or of ``default`` when it is
+    None or empty).
 
     The optimizers pop/insert keys while parsing their options; working on a copy keeps
     the caller's dict (e.g. ``AcquisitionFunction.optimizer_options``) intact across calls.
     """
-    if optimizer_options is None:
+    if not optimizer_options:
         return dict(default) if default is not None else {}
     return dict(optimizer_options)
 

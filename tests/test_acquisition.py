@@ -493,7 +493,6 @@ def test_wip_optimize_until_size():
     pool = _make_mc_pool(m=32, d=3)
     acq_kwargs = {"mc_samples": {"x": np.asarray(pool)}, "mc_points_size": 32}
 
-    assert WIPStd().optimize_until_size == 1000
     with pytest.raises(ValueError, match="optimize_until_size"):
         WIPStd(optimize_until_size=-1)
 
@@ -509,6 +508,33 @@ def test_wip_optimize_until_size():
     )
     assert pt_refined.shape == (3,)
     assert val_refined <= val_discrete + 1e-12
+
+
+def test_acquisition_optimization_settings_consistent():
+    """get_next_point and get_next_batch forward consistent settings to acq_optimize."""
+    gp = _make_wip_gp(n=20, d=3)
+    pool = _make_mc_pool(m=24, d=3)
+
+    for acq, acq_kwargs in (
+        (EI(), {}),
+        (WIPStd(), {"mc_samples": {"x": np.asarray(pool)}, "mc_points_size": 16}),
+    ):
+        recorded = []
+
+        def spy_optimize(*, x0, maxiter, n_restarts, **kwargs):
+            recorded.append((maxiter, n_restarts, jnp.atleast_2d(x0).shape[0]))
+            return jnp.atleast_2d(x0)[0], 0.0
+
+        acq.acq_optimize = spy_optimize
+        acq.get_next_point(gp, acq_kwargs=acq_kwargs, rng=np.random.default_rng(0))
+        acq.get_next_batch(gp, n_batch=1, acq_kwargs=acq_kwargs, rng=np.random.default_rng(0))
+        assert recorded[0] == recorded[1]
+        assert recorded[0][2] == recorded[0][1]  # x0 rows match n_restarts
+
+        acq.get_next_batch(
+            gp, n_batch=1, acq_kwargs=acq_kwargs, maxiter=17, n_restarts=3, rng=np.random.default_rng(0)
+        )
+        assert recorded[2] == (17, 3, 3)
 
 
 def run_all_tests():

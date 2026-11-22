@@ -151,6 +151,8 @@ class AcquisitionFunction:
     """
 
     name: str = "BaseAcquisitionFunction"
+    default_maxiter: int = 500
+    default_n_restarts: int = 8
 
     def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = None):
         self.optimizer = optimizer
@@ -164,13 +166,15 @@ class AcquisitionFunction:
     def fun(self, x):
         raise NotImplementedError
 
-    def get_next_point(self, gp: GP,
-                       acq_kwargs: Dict[str, Any] = {},
-                       maxiter: int = 500,
-                       n_restarts: int = 8,
-                       verbose: bool = True,
-                       early_stop_patience: int = 25,
-                       rng=None) -> Tuple[np.ndarray, float]:
+    def get_next_point(
+        self,
+        gp: GP,
+        acq_kwargs: Optional[Dict[str, Any]] = None,
+        maxiter: Optional[int] = None,
+        n_restarts: Optional[int] = None,
+        verbose: bool = True,
+        rng=None,
+    ) -> Tuple[np.ndarray, float]:
         """
         Optimize the acquisition function to obtain the next point to sample.
 
@@ -179,51 +183,52 @@ class AcquisitionFunction:
         gp : GP
             Gaussian process model.
         acq_kwargs : dict, optional
-            Additional arguments for the acquisition function. Default is {}.
+            Additional arguments for the acquisition function. Default is None.
         maxiter : int, optional
-            Maximum number of optimization iterations. Default is 500.
+            Maximum number of optimization iterations. Defaults to ``self.default_maxiter``.
         n_restarts : int, optional
-            Number of random restarts for optimization. Default is 8.
+            Number of random restarts for optimization. Defaults to ``self.default_n_restarts``.
         verbose : bool, optional
             Whether to print optimization progress. Default is True.
-        early_stop_patience : int, optional
-            Patience for early stopping. Default is 25.
         rng : np.random.Generator, optional
             Random number generator. Default is None.
-            
+
         Returns
         -------
         tuple
             (best_point, best_value) where best_point is shape (ndim,) and
             best_value is the acquisition function value.
-
         """
+        raise NotImplementedError("Base class get_next_point() not implemented")
 
-        raise NotImplementedError("Base class get_next() not implemented")
-
-    def get_next_batch(self, gp: GP,
-                       n_batch: int = 1,
-                       acq_kwargs: Dict[str, Any] = {},
-                       maxiter: int = 500,
-                       n_restarts: int = 8,
-                       verbose: bool = True,
-                       early_stop_patience: int = 25,
-                       rng=None) -> Tuple[np.ndarray, float]:
-
+    def get_next_batch(
+        self,
+        gp: GP,
+        n_batch: int = 1,
+        acq_kwargs: Optional[Dict[str, Any]] = None,
+        maxiter: Optional[int] = None,
+        n_restarts: Optional[int] = None,
+        verbose: bool = True,
+        rng=None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Get the next batch of points to sample.
         """
-
+        acq_kwargs = {} if acq_kwargs is None else acq_kwargs
+        maxiter = self.default_maxiter if maxiter is None else maxiter
+        n_restarts = self.default_n_restarts if n_restarts is None else n_restarts
         rng = rng if rng is not None else get_numpy_rng()
 
         x_batch, acq_vals = [], []
 
-        x_next, acq_val_next = self.get_next_point(gp, acq_kwargs=acq_kwargs,
-                                        maxiter=maxiter,
-                                        n_restarts=n_restarts,
-                                        verbose=verbose,
-                                        early_stop_patience=early_stop_patience,
-                                        rng=rng)
+        x_next, acq_val_next = self.get_next_point(
+            gp,
+            acq_kwargs=acq_kwargs,
+            maxiter=maxiter,
+            n_restarts=n_restarts,
+            verbose=verbose,
+            rng=rng,
+        )
         x_batch.append(x_next)
         acq_vals.append(acq_val_next)
 
@@ -234,13 +239,15 @@ class AcquisitionFunction:
             dummy_gp = GP.from_state_dict(gp.state_dict())
 
             dummy_gp.update(x_next, dummy_gp.predict_mean(x_next))
-            for i in range(1,n_batch):
-                x_next, acq_val_next = self.get_next_point(dummy_gp, acq_kwargs=acq_kwargs,
-                                                        maxiter=maxiter,
-                                                        n_restarts=n_restarts,
-                                                        verbose=verbose,
-                                                        early_stop_patience=early_stop_patience,
-                                                        rng=rng)
+            for _ in range(1, n_batch):
+                x_next, acq_val_next = self.get_next_point(
+                    dummy_gp,
+                    acq_kwargs=acq_kwargs,
+                    maxiter=maxiter,
+                    n_restarts=n_restarts,
+                    verbose=verbose,
+                    rng=rng,
+                )
                 x_batch.append(x_next)
                 acq_vals.append(acq_val_next)
 
@@ -270,6 +277,8 @@ class EI(AcquisitionFunction):
     """
 
     name: str = "EI"
+    default_maxiter: int = 1000
+    default_n_restarts: int = 50
 
     def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = None):
         super().__init__(optimizer=optimizer, optimizer_options=optimizer_options)
@@ -306,14 +315,18 @@ class EI(AcquisitionFunction):
 
         return jnp.reshape(-ei, ())  # optimizer minimizes this
     
-    def get_next_point(self, gp, 
-                       acq_kwargs,
-                 maxiter: int = 250,
-                 n_restarts: int = 20,
-                 verbose: bool = True,
-                 early_stop_patience: int = 25,
-                 rng=None):
-
+    def get_next_point(
+        self,
+        gp,
+        acq_kwargs: Optional[Dict[str, Any]] = None,
+        maxiter: Optional[int] = None,
+        n_restarts: Optional[int] = None,
+        verbose: bool = True,
+        rng=None,
+    ):
+        acq_kwargs = {} if acq_kwargs is None else acq_kwargs
+        maxiter = self.default_maxiter if maxiter is None else maxiter
+        n_restarts = self.default_n_restarts if n_restarts is None else n_restarts
         rng = rng if rng is not None else get_numpy_rng()
         zeta = acq_kwargs.get('zeta', 0.)
         best_y = acq_kwargs.get('best_y', max(gp.train_y.flatten()))
@@ -409,6 +422,9 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
         Default is 1000.
     """
 
+    default_maxiter: int = 200
+    default_n_restarts: int = 1
+
     def __init__(
         self,
         optimizer: str = "scipy",
@@ -452,26 +468,36 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
 
         if self.optimize_until_size is not None and n_conditioning > self.optimize_until_size:
             return x0_acq, acq_val_min
+
+        if n_restarts > 1:
+            n_starts = min(n_restarts, mc_points.shape[0])
+            x0_opt = mc_points[jnp.argsort(acq_vals)[:n_starts]]
+        else:
+            n_starts = 1
+            x0_opt = x0_acq
+
         return self.acq_optimize(
             fun=self.fun,
             fun_args=(gp,),
             fun_kwargs={'mc_points': mc_points, 'cache': cache},
             num_params=gp.ndim,
-            x0=x0_acq,
+            x0=x0_opt,
             bounds=[0, 1],
             optimizer_options=self.optimizer_options,
             maxiter=maxiter,
-            n_restarts=n_restarts,
+            n_restarts=n_starts,
             verbose=verbose,
         )
 
-    def get_next_point(self, gp,
-                 acq_kwargs,
-                 maxiter: int = 100,
-                 n_restarts: int = 1,
-                 verbose: bool = True,
-                 early_stop_patience: int = 25,
-                 rng=None):
+    def get_next_point(
+        self,
+        gp,
+        acq_kwargs: Optional[Dict[str, Any]] = None,
+        maxiter: Optional[int] = None,
+        n_restarts: Optional[int] = None,
+        verbose: bool = True,
+        rng=None,
+    ):
         """
         Optimize the acquisition function to obtain the next point.
 
@@ -485,13 +511,12 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
         acq_kwargs : dict
             Additional arguments containing 'mc_samples' and optionally 'mc_points_size'.
         maxiter : int, optional
-            Maximum optimization iterations. Default is 100.
+            Maximum optimization iterations. Defaults to ``self.default_maxiter`` (200).
         n_restarts : int, optional
-            Number of optimization restarts. Default is 1.
+            Number of optimization restarts (seeded from the top MC points).
+            Defaults to ``self.default_n_restarts`` (1).
         verbose : bool, optional
             Whether to print progress. Default is True.
-        early_stop_patience : int, optional
-            Early stopping patience. Default is 25.
         rng : np.random.Generator, optional
             Random number generator. Default is None.
 
@@ -500,6 +525,9 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
         tuple
             (best_point, best_value) where best_point is shape (ndim,).
         """
+        acq_kwargs = {} if acq_kwargs is None else acq_kwargs
+        maxiter = self.default_maxiter if maxiter is None else maxiter
+        n_restarts = self.default_n_restarts if n_restarts is None else n_restarts
         mc_points = self._draw_mc_points(acq_kwargs, rng)
         cache = gp.precompute_fantasy_cache(mc_points)
         return self._select_point(gp, mc_points, cache, gp.npoints, maxiter, n_restarts, verbose)
@@ -509,10 +537,9 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
         gp: GP,
         n_batch: int = 1,
         acq_kwargs: Optional[Dict[str, Any]] = None,
-        maxiter: int = 500,
-        n_restarts: int = 8,
+        maxiter: Optional[int] = None,
+        n_restarts: Optional[int] = None,
         verbose: bool = True,
-        early_stop_patience: int = 25,
         rng=None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -532,6 +559,8 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
         base-class copy-and-update path.
         """
         acq_kwargs = {} if acq_kwargs is None else acq_kwargs
+        maxiter = self.default_maxiter if maxiter is None else maxiter
+        n_restarts = self.default_n_restarts if n_restarts is None else n_restarts
         if not getattr(gp, 'supports_fantasy_conditioning', False):
             return super().get_next_batch(
                 gp,
@@ -540,7 +569,6 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
                 maxiter=maxiter,
                 n_restarts=n_restarts,
                 verbose=verbose,
-                early_stop_patience=early_stop_patience,
                 rng=rng,
             )
 
