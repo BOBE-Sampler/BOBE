@@ -890,6 +890,7 @@ class BOBE:
         num_hmc_warmup: Optional[int] = None,
         num_hmc_samples: Optional[int] = None,
         mc_points_size: Optional[int] = None,
+        share_mc_points: bool = False,
         thinning: int = 4,
         num_chains: Optional[int] = None,
         mc_points_method: str = 'NUTS',
@@ -935,6 +936,10 @@ class BOBE:
             Number of NUTS samples per chain.
         mc_points_size : int, optional
             Number of MC points subsampled for WIPV/WIPStd evaluation.
+        share_mc_points : bool, optional
+            WIPV/WIPStd batches only. If False (default), every point of a batch is
+            chosen on a freshly drawn subset of ``mc_points_size`` MC points. If True,
+            one subset is shared by the whole batch (cheaper, less exploration).
         thinning : int, optional
             Thinning factor for NUTS samples. Default is 4.
         num_chains : int, optional
@@ -1095,6 +1100,7 @@ class BOBE:
         self.num_hmc_warmup = num_hmc_warmup
         self.num_hmc_samples = num_hmc_samples
         self.mc_points_size = mc_points_size
+        self.share_mc_points = share_mc_points
         self.hmc_thinning = thinning
         self.hmc_num_chains = num_chains
         self.mc_points_method = mc_points_method
@@ -1140,6 +1146,7 @@ class BOBE:
             'num_hmc_warmup': num_hmc_warmup,
             'num_hmc_samples': num_hmc_samples,
             'mc_points_size': mc_points_size,
+            'share_mc_points': share_mc_points,
             'thinning': thinning,
             'num_chains': num_chains,
             'mc_points_method': mc_points_method,
@@ -1151,7 +1158,12 @@ class BOBE:
         self.results_dict = {}
 
         self.current_iteration = self.start_iteration
-        self.acquisition = _acq_funcs[acq_key](optimizer=self.optimizer)
+        if acq_key in ('wipv', 'wipstd'):
+            self.acquisition = _acq_funcs[acq_key](
+                optimizer=self.optimizer, share_mc_points=self.share_mc_points
+            )
+        else:
+            self.acquisition = _acq_funcs[acq_key](optimizer=self.optimizer)
         if acq_key == 'wipv':
             self.run_WIPV(ii=self.current_iteration)
         elif acq_key == 'wipstd':
@@ -1261,7 +1273,10 @@ class BOBE:
         if not self.is_main:
             return
 
-        self.acquisition = acq_func_class(optimizer=self.optimizer)
+        self.acquisition = acq_func_class(
+            optimizer=self.optimizer,
+            share_mc_points=self.share_mc_points,
+        )
         acq_name = self.acquisition.name
 
         current_evals = self.total_objective_evals

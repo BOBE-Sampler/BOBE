@@ -3,7 +3,7 @@ Gaussian Process (GP) surrogate model implementation using exact GP inference.
 """
 
 from math import pi
-from typing import Any, List
+from typing import Any, List, NamedTuple, Optional
 import jax.numpy as jnp
 import numpy as np
 import jax
@@ -31,24 +31,78 @@ def gp_mll(k, train_y, num_points):
     return mll
 
 
+def _clip_var(var):
+    """Replace NaN / sub-floor variances (numerical round-off) by ``safe_noise_floor``."""
+    var = jnp.where(jnp.isnan(var), safe_noise_floor, var)
+    return jnp.where(var < safe_noise_floor, safe_noise_floor, var)
+
+
+def _extend_cholesky_row(L: jnp.ndarray, v: jnp.ndarray, sqrt_s: jnp.ndarray) -> jnp.ndarray:
+    """Append bottom row ``[v, sqrt_s]`` to lower-triangular Cholesky factor ``L``."""
+    n = L.shape[0]
+    L_new = jnp.zeros((n + 1, n + 1), dtype=L.dtype)
+    return L_new.at[:n, :n].set(L).at[n, :n].set(v).at[n, n].set(sqrt_s)
+
+
 @jax.jit
 def fast_update_cholesky(L: jnp.ndarray, k: jnp.ndarray, k_self: float):
     # solve L v = k  -> v has shape (n,)
     v = solve_triangular(L, k, lower=True)
 
-    # new diagonal entry
-    diag = jnp.sqrt(k_self - jnp.dot(v, v))
+    # new diagonal entry (clamped against numerical round-off)
+    diag = jnp.sqrt(jnp.maximum(k_self - jnp.dot(v, v), safe_noise_floor))
 
-    # build a zero (n+1)x(n+1) and fill blocks
-    n = L.shape[0]
-    new_L = jnp.zeros((n + 1, n + 1), dtype=L.dtype)
-    new_L = new_L.at[:n, :n].set(L)      # top-left
-    new_L = new_L.at[n, :n].set(v)       # bottom-left
-    new_L = new_L.at[n, n].set(diag)     # bottom-right
-    return new_L
+    return _extend_cholesky_row(L, v, diag)
+
+
+class FantasyCache(NamedTuple):
+    """
+    Exact-GP posterior restricted to a fixed set of M MC integration points.
+
+    Built by ``GP.precompute_fantasy_cache`` and consumed by ``fantasy_var``,
+    ``fantasy_var_scan`` and ``condition_fantasy_cache``. Everything is in
+    standardised units and independent of the training targets, so fantasised
+    batch points can be conditioned on without touching ``y``.
+
+    Attributes
+    ----------
+    L : jnp.ndarray, shape (N', N')
+        Lower Cholesky factor of ``k(X, X) + noise`` for the conditioning set.
+    X : jnp.ndarray, shape (N', D)
+        Conditioning inputs: the training points plus any fantasised points.
+    V : jnp.ndarray, shape (N', M)
+        ``L^{-1} k(X, mc_points)``.
+    var0 : jnp.ndarray, shape (M,)
+        Predictive variance at the MC points given ``X`` (noise included).
+    C : jnp.ndarray, shape (M, M)
+        Posterior covariance among the MC points given ``X`` (noise excluded).
+    """
+    L: jnp.ndarray
+    X: jnp.ndarray
+    V: jnp.ndarray
+    var0: jnp.ndarray
+    C: jnp.ndarray
+
+
+@jax.jit
+def _fantasy_scan_var(C, var0, y_std):
+    """
+    Fantasy variances with every MC point as the candidate.
+
+    ``out[j, m]`` is the physical-scale predictive variance at MC point ``m``
+    after adding MC point ``j`` to the conditioning set:
+    ``var0[m] - C[j, m]**2 / var0[j]``. Shapes depend only on M, so this
+    compiles once per run.
+    """
+    s = jnp.maximum(var0, safe_noise_floor)
+    return _clip_var(var0[None, :] - C**2 / s[:, None]) * y_std**2
 
 
 class GP(Surrogate):
+
+    #: Implements ``condition_fantasy_cache``, so WIPV/WIPStd can select whole
+    #: batches by conditioning the cache instead of copying and refactorising the GP.
+    supports_fantasy_conditioning = True
 
     def __init__(
         self,
@@ -325,10 +379,7 @@ class GP(Surrogate):
         k22 = self.kernel.diagonal(x_2d, include_noise=True)                   # shape (M,)
         mean = (k12.T @ self.alphas).squeeze(-1)                               # shape (M,)
         vv = solve_triangular(self.cholesky, k12, lower=True)                  # shape (N, M)
-        var = k22 - jnp.sum(vv * vv, axis=0)                                   # shape (M,)
-        # Handle NaNs and negative variances due to numerical issues
-        var = jnp.where(jnp.isnan(var), safe_noise_floor, var)
-        var = jnp.where(var < safe_noise_floor, safe_noise_floor, var)
+        var = _clip_var(k22 - jnp.sum(vv * vv, axis=0))                        # shape (M,)
         if not standardized:
             mean = mean * self.y_std + self.y_mean
             var = var * self.y_std**2
@@ -408,10 +459,13 @@ class GP(Surrogate):
         self.cholesky = jnp.linalg.cholesky(K)
         self.alphas = cho_solve((self.cholesky, True), self.train_y)
 
-    def precompute_fantasy_cache(self, mc_points: jnp.ndarray) -> Any:
+    def precompute_fantasy_cache(self, mc_points: jnp.ndarray) -> FantasyCache:
         """
-        Precompute the cross-covariance matrix between training points and
-        MC integration points. Passed as ``cache`` to ``fantasy_var``.
+        Precompute the GP posterior on the MC integration points once, so each
+        candidate in ``fantasy_var`` only costs O(N^2 + N M).
+
+        Costs one O(N^2 M) triangular solve plus O(N M^2) for the MC-point
+        posterior covariance ``C``.
 
         Parameters
         ----------
@@ -419,40 +473,122 @@ class GP(Surrogate):
 
         Returns
         -------
-        jnp.ndarray, shape (N, M)
-            ``kernel(train_x, mc_points)`` without noise.
+        FantasyCache
+            ``L``, ``X`` (current Cholesky factor and training inputs),
+            ``V = L^{-1} k(X, mc_points)``, ``var0`` and ``C``.
         """
-        return self.kernel.covariance(self.train_x, mc_points, include_noise=False)
+        return self._build_fantasy_cache(self.cholesky, jnp.asarray(self.train_x), mc_points)
 
-    def fantasy_var(self, new_x, mc_points, cache):
+    def _build_fantasy_cache(self, L, X, mc_points) -> FantasyCache:
+        """Build a ``FantasyCache`` for ``mc_points`` given conditioning ``(L, X)``."""
+        mc_points = jnp.atleast_2d(jnp.asarray(mc_points))
+        k_x_mc = self.kernel.covariance(X, mc_points, include_noise=False)            # (N, M)
+        V = solve_triangular(L, k_x_mc, lower=True)                                   # (N, M)
+        var0 = self.kernel.diagonal(mc_points, include_noise=True) - jnp.sum(V * V, axis=0)
+        C = self.kernel.covariance(mc_points, mc_points, include_noise=False) - V.T @ V
+        return FantasyCache(L=L, X=X, V=V, var0=var0, C=C)
+
+    def _cholesky_step(self, new_x, cache: FantasyCache):
         """
-        Computes the variance of the GP at the mc_points assuming a single point
-        new_x is added to the training set.
+        Compute ``(v, s)`` for appending ``new_x`` (shape ``(1, D)``) to ``cache``:
+
+        - ``v = L^{-1} k(X, x*)``          (new Cholesky row prefix)
+        - ``s = k(x*, x*) + noise - v.v``  (predictive variance at ``x*``, floored)
+        """
+        k_x_new = self.kernel.covariance(cache.X, new_x, include_noise=False)[:, 0]   # (N',)
+        v = solve_triangular(cache.L, k_x_new, lower=True)                            # O(N'^2)
+        s = self.kernel.diagonal(new_x, include_noise=True)[0] - v @ v
+        s = jnp.maximum(s, safe_noise_floor)
+        return v, s
+
+    def _fantasy_terms(self, new_x, mc_points, cache: FantasyCache):
+        """
+        Rank-1 Schur terms ``(v, s, c)`` for adding ``new_x`` (shape ``(1, D)``)
+        to the conditioning set in ``cache``, where ``c = k(mc, x*) - V^T v`` is
+        the posterior covariance between ``mc_points`` and ``new_x``.
+        """
+        v, s = self._cholesky_step(new_x, cache)
+        c = self.kernel.covariance(new_x, mc_points, include_noise=False)[0] - v @ cache.V  # O(N' M)
+        return v, s, c
+
+    def fantasy_var(self, new_x, mc_points, cache: FantasyCache):
+        """
+        Variance of the GP at ``mc_points`` if a single point ``new_x`` were
+        added to the training set.
+
+        Uses the exact rank-1 Schur-complement update
+        ``Var_new = var0 - c**2 / s`` (O(N^2 + N M) per candidate).
 
         Parameters
         ----------
         new_x : jnp.ndarray, shape (D,) or (1, D)
             Candidate point.
         mc_points : jnp.ndarray, shape (M, D)
-            Integration points.
-        cache : jnp.ndarray, shape (N, M)
-            Output of ``precompute_fantasy_cache(mc_points)``.
+            Integration points (the same ones the cache was built for).
+        cache : FantasyCache
+            Output of ``precompute_fantasy_cache(mc_points)``, optionally
+            conditioned on fantasised points via ``condition_fantasy_cache``.
+
+        Returns
+        -------
+        jnp.ndarray, shape (M,)
+            Fantasy variances in physical (unstandardised) scale.
         """
         new_x = jnp.atleast_2d(new_x)
-        k = self.kernel.covariance(self.train_x, new_x, include_noise=False).flatten()  # shape (n,)
-        k_self = self.kernel.diagonal(new_x, include_noise=True)[0]  # scalar
-        k11_cho = fast_update_cholesky(self.cholesky, k, k_self)
+        _, s, c = self._fantasy_terms(new_x, mc_points, cache)
+        return _clip_var(cache.var0 - c**2 / s) * self.y_std**2
 
-        # Compute only the extra row for new_x
-        k_new_mc = self.kernel.covariance(new_x, mc_points, include_noise=False)  # shape (1, n_mc)
-        k12 = jnp.vstack([cache, k_new_mc])
-        k22 = self.kernel.diagonal(mc_points, include_noise=True)  # (N_mc,)
-        vv = solve_triangular(k11_cho, k12, lower=True)  # shape (N_train,N_mc)
-        var = k22 - jnp.sum(vv * vv, axis=0)
-        # handle nans and negative variances due to numerical issues
-        var = jnp.where(jnp.isnan(var), safe_noise_floor, var)
-        var = jnp.where(var < safe_noise_floor, safe_noise_floor, var)
-        return var * self.y_std**2  # return to physical scale for better interpretability
+    def fantasy_var_scan(self, mc_points: jnp.ndarray, cache: FantasyCache):
+        """
+        Fantasy variances with every MC point of ``cache`` as the candidate.
+
+        Returns
+        -------
+        jnp.ndarray, shape (M, M)
+            Row ``j`` equals ``fantasy_var(mc_points[j], mc_points, cache)``.
+            Costs O(M^2) given the cache, versus M separate O(N^2 M) solves.
+        """
+        return _fantasy_scan_var(cache.C, cache.var0, self.y_std)
+
+    def condition_fantasy_cache(
+        self,
+        cache: FantasyCache,
+        new_x: jnp.ndarray,
+        mc_points: Optional[jnp.ndarray] = None,
+        *,
+        new_mc_points: Optional[jnp.ndarray] = None,
+    ) -> FantasyCache:
+        """
+        Condition the cached MC-point posterior on a fantasised observation at
+        ``new_x`` (kriging believer), without copying the GP or refactorising.
+
+        - If ``new_mc_points`` is provided, only ``(L, X)`` are extended (O(N^2))
+          and ``(V, var0, C)`` are built directly for ``new_mc_points``
+          (O(N'^2 M + N' M^2)), avoiding wasted work on the discarded subset.
+        - Otherwise ``mc_points`` must be provided; one row is appended to
+          ``L`` / ``X`` / ``V`` (O(N^2 + N M)) and ``var0`` / ``C`` are updated
+          in place via rank-1 downdates (O(M^2)).
+        """
+        new_x = jnp.atleast_2d(jnp.asarray(new_x))
+        X_new = jnp.vstack([cache.X, new_x])
+        if new_mc_points is not None:
+            v, s = self._cholesky_step(new_x, cache)
+            L_new = _extend_cholesky_row(cache.L, v, jnp.sqrt(s))
+            return self._build_fantasy_cache(L_new, X_new, new_mc_points)
+
+        if mc_points is None:
+            raise ValueError("Provide either mc_points or new_mc_points to condition_fantasy_cache.")
+        mc_points = jnp.atleast_2d(jnp.asarray(mc_points))
+        v, s, c = self._fantasy_terms(new_x, mc_points, cache)
+        sqrt_s = jnp.sqrt(s)
+        L_new = _extend_cholesky_row(cache.L, v, sqrt_s)
+        return FantasyCache(
+            L=L_new,
+            X=X_new,
+            V=jnp.vstack([cache.V, (c / sqrt_s)[None, :]]),
+            var0=cache.var0 - c**2 / s,
+            C=cache.C - jnp.outer(c, c) / s,
+        )
 
     def get_random_point(self, rng=None, nstd=None):
         """

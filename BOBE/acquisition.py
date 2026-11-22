@@ -1,7 +1,6 @@
 from typing import Any, List, Optional, Dict, Tuple
 import jax
 import jax.numpy as jnp
-from jax import lax,jit
 import numpy as np
 from scipy.stats import qmc
 from jax.scipy.stats import norm
@@ -387,20 +386,84 @@ class LogEI(EI):
 
 class WeightedIntegratedPosteriorBase(AcquisitionFunction):
     """Base class for Weighted Integrated Posterior acquisition functions.
-    
+
     This base class provides common functionality for acquisition functions that
     integrate over MC samples from the GP posterior, such as WIPV and WIPStd.
-    
+
     Parameters
     ----------
     optimizer : str, optional
         Optimizer to use ('scipy' or 'optax'). Default is 'scipy'.
     optimizer_options : dict, optional
-        Additional options for the optimizer. Default is {}.
+        Additional options for the optimizer. Default is None.
+    share_mc_points : bool, optional
+        If False (default), each point of a batch is chosen on a freshly drawn
+        subset of MC points, so no single subset dominates the batch.
+        If True, one subset is drawn per batch and later selections reuse it
+        via O(M^2) rank-1 cache updates.
+    optimize_until_size : int or None, optional
+        Maximum number of conditioning points (training + fantasised points)
+        for which continuous optimization refines the best MC candidate.
+        Above this size, the best MC point is returned directly. Set to ``0``
+        to always skip continuous refinement, or ``None`` to always refine.
+        Default is 1000.
     """
 
-    def __init__(self, optimizer: str = "scipy", optimizer_options: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        optimizer: str = "scipy",
+        optimizer_options: Optional[Dict[str, Any]] = None,
+        share_mc_points: bool = False,
+        optimize_until_size: Optional[int] = 1000,
+    ):
         super().__init__(optimizer=optimizer, optimizer_options=optimizer_options)
+        if optimize_until_size is not None and optimize_until_size < 0:
+            raise ValueError(
+                f"optimize_until_size must be >= 0 or None, got {optimize_until_size}"
+            )
+        self.share_mc_points = share_mc_points
+        self.optimize_until_size = optimize_until_size
+
+    def _reduce(self, var):
+        """Collapse fantasy variances over the MC points (last axis) into the acquisition value."""
+        raise NotImplementedError
+
+    def fun(self, x, gp, mc_points=None, cache=None):
+        return self._reduce(gp.fantasy_var(new_x=x, mc_points=mc_points, cache=cache))
+
+    @staticmethod
+    def _draw_mc_points(acq_kwargs, rng):
+        mc_samples = acq_kwargs.get('mc_samples')
+        mc_points_size = acq_kwargs.get('mc_points_size', 128)
+        return jnp.asarray(get_mc_points(mc_samples, mc_points_size=mc_points_size, rng=rng))
+
+    def _select_point(self, gp, mc_points, cache, n_conditioning, maxiter, n_restarts, verbose):
+        """
+        Score every MC point as a candidate, then (when ``optimize_until_size``
+        is ``None`` or ``n_conditioning <= optimize_until_size``) refine the
+        best one with the continuous optimizer.
+        """
+        acq_vals = self._reduce(gp.fantasy_var_scan(mc_points, cache))
+
+        best_idx = int(jnp.argmin(acq_vals))
+        acq_val_min = float(acq_vals[best_idx])
+        log.debug(f"{self.name} acquisition min value on MC points: {acq_val_min:.4e}")
+        x0_acq = mc_points[best_idx]
+
+        if self.optimize_until_size is not None and n_conditioning > self.optimize_until_size:
+            return x0_acq, acq_val_min
+        return self.acq_optimize(
+            fun=self.fun,
+            fun_args=(gp,),
+            fun_kwargs={'mc_points': mc_points, 'cache': cache},
+            num_params=gp.ndim,
+            x0=x0_acq,
+            bounds=[0, 1],
+            optimizer_options=self.optimizer_options,
+            maxiter=maxiter,
+            n_restarts=n_restarts,
+            verbose=verbose,
+        )
 
     def get_next_point(self, gp,
                  acq_kwargs,
@@ -411,10 +474,10 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
                  rng=None):
         """
         Optimize the acquisition function to obtain the next point.
-        
+
         This method is shared between WIPV and WIPStd as they follow the same
         optimization procedure but differ only in their objective function.
-        
+
         Parameters
         ----------
         gp : GP
@@ -431,93 +494,130 @@ class WeightedIntegratedPosteriorBase(AcquisitionFunction):
             Early stopping patience. Default is 25.
         rng : np.random.Generator, optional
             Random number generator. Default is None.
-            
+
         Returns
         -------
         tuple
             (best_point, best_value) where best_point is shape (ndim,).
         """
-        mc_samples = acq_kwargs.get('mc_samples')
-        mc_points_size = acq_kwargs.get('mc_points_size', 128)
-        mc_points = get_mc_points(mc_samples, mc_points_size=mc_points_size, rng=rng)
+        mc_points = self._draw_mc_points(acq_kwargs, rng)
+        cache = gp.precompute_fantasy_cache(mc_points)
+        return self._select_point(gp, mc_points, cache, gp.npoints, maxiter, n_restarts, verbose)
+
+    def get_next_batch(
+        self,
+        gp: GP,
+        n_batch: int = 1,
+        acq_kwargs: Optional[Dict[str, Any]] = None,
+        maxiter: int = 500,
+        n_restarts: int = 8,
+        verbose: bool = True,
+        early_stop_patience: int = 25,
+        rng=None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Greedy (kriging-believer) batch selection.
+
+        After each selection the cache is conditioned on the chosen point via
+        ``gp.condition_fantasy_cache``, which is exact because fantasy variances
+        do not depend on the fantasised value. This avoids copying the GP and
+        refactorising its Cholesky for every batch point.
+
+        By default (``share_mc_points=False``) a fresh MC subset is drawn for
+        every batch point and the conditioned cache is built directly for it.
+        With ``share_mc_points=True`` the first subset is kept and later
+        selections cost only O(M^2) each.
+
+        Surrogates without ``supports_fantasy_conditioning`` fall back to the
+        base-class copy-and-update path.
+        """
+        acq_kwargs = {} if acq_kwargs is None else acq_kwargs
+        if not getattr(gp, 'supports_fantasy_conditioning', False):
+            return super().get_next_batch(
+                gp,
+                n_batch=n_batch,
+                acq_kwargs=acq_kwargs,
+                maxiter=maxiter,
+                n_restarts=n_restarts,
+                verbose=verbose,
+                early_stop_patience=early_stop_patience,
+                rng=rng,
+            )
+
+        rng = rng if rng is not None else get_numpy_rng()
+        mc_points = self._draw_mc_points(acq_kwargs, rng)
         cache = gp.precompute_fantasy_cache(mc_points)
 
-        @jax.jit
-        def mapped_fn(x):
-            return self.fun(x, gp, mc_points=mc_points, cache=cache)
+        x_batch, acq_vals = [], []
+        base_npoints = gp.npoints
+        for i in range(n_batch):
+            x_next, acq_val_next = self._select_point(
+                gp, mc_points, cache, base_npoints + i, maxiter, n_restarts, verbose
+            )
+            x_batch.append(np.asarray(x_next))
+            acq_vals.append(float(acq_val_next))
+            if i + 1 < n_batch:
+                if self.share_mc_points:
+                    cache = gp.condition_fantasy_cache(cache, x_next, mc_points)
+                else:
+                    mc_points = self._draw_mc_points(acq_kwargs, rng)
+                    cache = gp.condition_fantasy_cache(cache, x_next, new_mc_points=mc_points)
 
-        acq_vals = lax.map(mapped_fn, mc_points)
-        acq_val_min = jnp.min(acq_vals)
-        log.debug(f"{self.name} acquisition min value on MC points: {float(acq_val_min):.4e}")
-        best_x = mc_points[jnp.argmin(acq_vals)]
-        x0_acq = best_x
-
-        if gp.train_x.shape[0] > 500:
-            return x0_acq, float(acq_val_min)
-        else:
-            return self.acq_optimize(fun=self.fun,
-                                  fun_args=(gp,),
-                                  fun_kwargs={'mc_points': mc_points, 'cache': cache},
-                                  num_params=gp.ndim,
-                                  x0=x0_acq,
-                                  bounds = [0,1],
-                                  optimizer_options=self.optimizer_options,
-                                  maxiter=maxiter,
-                                  n_restarts=n_restarts,
-                                  verbose=verbose)
+        return np.array(x_batch), np.array(acq_vals)
 
 
 class WIPV(WeightedIntegratedPosteriorBase):
     """Weighted Integrated Posterior Variance acquisition function.
-    
+
     WIPV focuses on reducing uncertainty in regions weighted by posterior probability.
     It integrates the posterior variance over MC samples drawn from the GP posterior,
     making it particularly effective for Bayesian evidence estimation.
-    
+
     The criterion is defined as:
         WIPV(x) = E_{x' ~ p(x' | D)}[Var[f(x) | D]]
-    
+
     where the expectation is over MC samples x' from the posterior.
-    
+
     Parameters
     ----------
     optimizer : str, optional
         Optimizer to use ('scipy' or 'optax'). Default is 'scipy'.
     optimizer_options : dict, optional
-        Additional options for the optimizer. Default is {}.
-        
+        Additional options for the optimizer. Default is None.
+    share_mc_points : bool, optional
+        Whether to share one MC subset across a batch. Default is False.
     """
 
     name: str = "WIPV"
 
-    def fun(self, x, gp, mc_points=None, cache=None):
-        var = gp.fantasy_var(new_x=x, mc_points=mc_points, cache=cache)
-        return jnp.mean(var)
+    def _reduce(self, var):
+        return jnp.mean(var, axis=-1)
 
 
 class WIPStd(WeightedIntegratedPosteriorBase):
     """Weighted Integrated Posterior Standard Deviation acquisition function.
-    
+
     WIPStd is similar to WIPV but uses standard deviation instead of variance,
     which can provide different exploration characteristics. It integrates the
     posterior standard deviation over MC samples from the GP posterior.
-    
+
     The criterion is defined as:
         WIPStd(x) = E_{x' ~ p(x' | D)}[Std[f(x) | D]]
-    
+
     Parameters
     ----------
     optimizer : str, optional
         Optimizer to use ('scipy' or 'optax'). Default is 'scipy'.
     optimizer_options : dict, optional
-        Additional options for the optimizer. Default is {}.
+        Additional options for the optimizer. Default is None.
+    share_mc_points : bool, optional
+        Whether to share one MC subset across a batch. Default is False.
     """
 
     name: str = "WIPStd"
 
-    def fun(self, x, gp, mc_points=None, cache=None):
-        std = jnp.sqrt(gp.fantasy_var(new_x=x, mc_points=mc_points, cache=cache))
-        return jnp.mean(std)
+    def _reduce(self, var):
+        return jnp.mean(jnp.sqrt(var), axis=-1)
 
 
 def get_mc_samples(

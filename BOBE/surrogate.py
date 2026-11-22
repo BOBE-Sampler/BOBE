@@ -8,8 +8,9 @@ Custom surrogate implementations should subclass ``Surrogate`` (and optionally
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -131,8 +132,8 @@ class Surrogate(ABC):
         ``fantasy_var`` for many candidate points against the same set of
         MC integration points.
 
-        For an exact GP this is ``kernel(train_x, mc_points)`` (the
-        cross-covariance matrix).  For a sparse GP it might be
+        For an exact GP this is a ``FantasyCache`` (the posterior restricted to
+        the MC points; see ``BOBE.gp``).  For a sparse GP it might be
         inducing-point cross-covariances.  For a non-GP surrogate this
         can return ``None``.
 
@@ -173,6 +174,48 @@ class Surrogate(ABC):
             Fantasy variances in *physical* scale.
         """
         ...
+
+    #: Set to ``True`` by surrogates that implement ``condition_fantasy_cache``.
+    #: WIPV/WIPStd then select batches by conditioning the cache in place instead
+    #: of copying the surrogate as a ``GP`` and calling ``update`` per batch point.
+    supports_fantasy_conditioning: bool = False
+
+    def fantasy_var_scan(
+        self,
+        mc_points: jnp.ndarray,
+        cache: Any,
+    ) -> jnp.ndarray:
+        """
+        Fantasy variances with every point in ``mc_points`` as the candidate,
+        shape ``(M, M)``; row ``j`` equals
+        ``fantasy_var(mc_points[j], mc_points, cache)``.
+
+        Defaults to mapping ``fantasy_var`` over ``mc_points``; exact GP
+        subclasses override this with an O(M^2) Schur-complement scan.
+        """
+        @jax.jit
+        def mapped_fn(x):
+            return self.fantasy_var(x, mc_points, cache)
+
+        return jax.lax.map(mapped_fn, mc_points)
+
+    def condition_fantasy_cache(
+        self,
+        cache: Any,
+        new_x: jnp.ndarray,
+        mc_points: Optional[jnp.ndarray] = None,
+        *,
+        new_mc_points: Optional[jnp.ndarray] = None,
+    ) -> Any:
+        """
+        Optional. Return ``cache`` updated as if ``new_x`` had been added to the
+        training set (the fantasised value is irrelevant for variances).
+
+        If ``new_mc_points`` is provided, the conditioned posterior is built
+        directly for ``new_mc_points``; otherwise ``cache`` is updated in place
+        for the existing ``mc_points``.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def get_random_point(self, rng=None, nstd=None) -> np.ndarray:
